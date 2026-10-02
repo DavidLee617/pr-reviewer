@@ -1,0 +1,7 @@
+target/
+*.iml
+.idea/
+.vscode/
+report*.json
+*.env
+config/application.yml

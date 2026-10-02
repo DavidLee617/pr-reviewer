@@ -1,0 +1,94 @@
+package com.lee.prreviewer.pipeline;
+
+import com.lee.prreviewer.github.GitHubPrClient;
+import com.lee.prreviewer.github.PrFile;
+import com.lee.prreviewer.github.PrInfo;
+import com.lee.prreviewer.github.PrUrlParser;
+import com.lee.prreviewer.map.FileReviewResult;
+import com.lee.prreviewer.map.FileReviewer;
+import com.lee.prreviewer.model.ChangeType;
+import com.lee.prreviewer.model.FileDiff;
+import com.lee.prreviewer.model.PrSummary;
+import com.lee.prreviewer.model.PreparedPr;
+import com.lee.prreviewer.model.ReviewRequest;
+import com.lee.prreviewer.model.SkippedFile;
+import com.lee.prreviewer.preprocess.FileFilter;
+import com.lee.prreviewer.preprocess.PatchParser;
+import com.lee.prreviewer.preprocess.PrSummaryBuilder;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.stereotype.Service;
+
+/**
+ * 审查流水线对外统一入口，CLI 和 MCP 都只调用这里。
+ * 当前：prepare()（预处理）、reviewFile()（单文件 map）；review(request, mode) 在 M4 加入。
+ * <p>
+ * C# 对照：{@code @Service} 与 {@code @Component} 等价，只是语义上标明这是业务服务层（≈ 注册为 Scoped/Singleton 的 XxxService）。
+ */
+@Service
+public class ReviewPipeline {
+
+    private final GitHubPrClient gitHub;
+    private final PatchParser patchParser;
+    private final FileFilter fileFilter;
+    private final PrSummaryBuilder summaryBuilder;
+    private final FileReviewer fileReviewer;
+
+    public ReviewPipeline(GitHubPrClient gitHub, PatchParser patchParser,
+                          FileFilter fileFilter, PrSummaryBuilder summaryBuilder, FileReviewer fileReviewer) {
+        this.gitHub = gitHub;
+        this.patchParser = patchParser;
+        this.fileFilter = fileFilter;
+        this.summaryBuilder = summaryBuilder;
+        this.fileReviewer = fileReviewer;
+    }
+
+    /** PR 链接 → 拉取 → 过滤 → 解析 patch → 生成摘要。 */
+    public PreparedPr prepare(String prUrl) {
+        ReviewRequest request = PrUrlParser.parse(prUrl);
+        PrInfo info = gitHub.getPullRequest(request);
+        List<PrFile> rawFiles = gitHub.listFiles(request);
+
+        List<FileDiff> files = new ArrayList<>();
+        List<SkippedFile> skipped = new ArrayList<>();
+        for (PrFile f : rawFiles) {
+            Optional<SkippedFile> skip = fileFilter.check(f);
+            if (skip.isPresent()) {
+                skipped.add(skip.get());
+            } else {
+                files.add(patchParser.parse(f.filename(), ChangeType.fromGitHubStatus(f.status()), f.patch()));
+            }
+        }
+        PrSummary summary = summaryBuilder.build(info.title(), files);
+        return new PreparedPr(request, prUrl, info.headSha(), files, skipped, summary);
+    }
+
+    /**
+     * 审查 PR 中的单个文件（对应 MCP tool review_file）。
+     *
+     * @param filePath GitHub 返回的完整路径；也接受唯一匹配的路径后缀，如 service/OrderService.java
+     * @throws IllegalArgumentException 文件不在 PR 中、被跳过、或后缀匹配到多个文件
+     */
+    public FileReviewResult reviewFile(String prUrl, String filePath) {
+        PreparedPr pr = prepare(prUrl);
+        List<FileDiff> matches = pr.files().stream()
+                .filter(f -> f.path().equals(filePath) || f.path().endsWith("/" + filePath))
+                .toList();
+        if (matches.size() == 1) {
+            return fileReviewer.review(matches.get(0), pr.summary());
+        }
+        if (matches.size() > 1) {
+            throw new IllegalArgumentException("路径 " + filePath + " 匹配到多个文件: "
+                    + matches.stream().map(FileDiff::path).toList());
+        }
+        String skippedReason = pr.skippedFiles().stream()
+                .filter(s -> s.path().equals(filePath) || s.path().endsWith("/" + filePath))
+                .map(s -> s.path() + "：" + s.reason())
+                .findFirst()
+                .orElse(null);
+        throw new IllegalArgumentException(skippedReason != null
+                ? "该文件被跳过，不审查 — " + skippedReason
+                : "PR 中没有文件 " + filePath);
+    }
+}

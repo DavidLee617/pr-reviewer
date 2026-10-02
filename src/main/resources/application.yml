@@ -1,0 +1,55 @@
+# C# 对照：application.yml ≈ appsettings.json
+# ${ENV_VAR:} 表示从环境变量读取、缺省为空串（≈ 环境变量覆盖 appsettings 的配置提供程序）。
+# 缺省为空是为了让 @Validated 给出清晰的"缺少配置"错误，而不是占位符解析失败。
+# 所有密钥只从环境变量读，不要在本文件里写真实值。
+
+spring:
+  main:
+    web-application-type: none   # 不启动 Web 服务（≈ 用 Host 而不是 WebApplication）
+    banner-mode: off             # MCP stdio 模式下 stdout 是协议通道，banner 会破坏协议
+    log-startup-info: false
+  http:
+    client:
+      # Spring AI 内部的 RestClient 使用这里的超时（≈ HttpClient.Timeout）
+      read-timeout: ${llm.timeout-seconds}s
+  ai:
+    openai:
+      base-url: ${llm.base-url}
+      api-key: ${llm.api-key}
+      chat:
+        options:
+          model: ${llm.model}
+    retry:
+      # 关闭 Spring AI 自带重试（默认 10 次），由 LlmClient 自己重试，才能准确记录 attempts
+      max-attempts: 1
+    model:
+      # 只用 chat，关闭 OpenAI starter 顺带装配的其他模型
+      embedding: none
+      image: none
+      audio:
+        speech: none
+        transcription: none
+      moderation: none
+
+llm:
+  base-url: ${LLM_BASE_URL:}
+  api-key: ${LLM_API_KEY:}
+  model: ${LLM_MODEL:}
+  timeout-seconds: 120
+
+github:
+  api-base: https://api.github.com
+  token: ${GITHUB_TOKEN:}
+
+review:
+  concurrency: 4
+  max-retries: 2
+  summary-max-tokens: 1500       # 设计原为 500；50+ 文件的 PR 会截掉全部签名，已调高
+  filter:
+    include-globs:               # 只审查 Java 源文件
+      - "**/*.java"
+    exclude-globs:               # 构建产物与自动生成代码
+      - "**/target/**"
+      - "**/build/**"
+      - "**/generated/**"
+      - "**/generated-sources/**"
