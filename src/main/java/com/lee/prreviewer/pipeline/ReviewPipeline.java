@@ -4,17 +4,22 @@ import com.lee.prreviewer.github.GitHubPrClient;
 import com.lee.prreviewer.github.PrFile;
 import com.lee.prreviewer.github.PrInfo;
 import com.lee.prreviewer.github.PrUrlParser;
+import com.lee.prreviewer.llm.CallMetrics;
 import com.lee.prreviewer.map.FileReviewResult;
 import com.lee.prreviewer.map.FileReviewer;
 import com.lee.prreviewer.model.ChangeType;
 import com.lee.prreviewer.model.FileDiff;
+import com.lee.prreviewer.model.Finding;
 import com.lee.prreviewer.model.PrSummary;
 import com.lee.prreviewer.model.PreparedPr;
+import com.lee.prreviewer.model.ReviewMode;
+import com.lee.prreviewer.model.ReviewReport;
 import com.lee.prreviewer.model.ReviewRequest;
 import com.lee.prreviewer.model.SkippedFile;
 import com.lee.prreviewer.preprocess.FileFilter;
 import com.lee.prreviewer.preprocess.PatchParser;
 import com.lee.prreviewer.preprocess.PrSummaryBuilder;
+import com.lee.prreviewer.reduce.FindingAggregator;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -22,7 +27,7 @@ import org.springframework.stereotype.Service;
 
 /**
  * 审查流水线对外统一入口，CLI 和 MCP 都只调用这里。
- * 当前：prepare()（预处理）、reviewFile()（单文件 map）；review(request, mode) 在 M4 加入。
+ * review()（完整审查）、prepare()（预处理）、reviewFile()（单文件 map）。
  * <p>
  * C# 对照：{@code @Service} 与 {@code @Component} 等价，只是语义上标明这是业务服务层（≈ 注册为 Scoped/Singleton 的 XxxService）。
  */
@@ -34,14 +39,44 @@ public class ReviewPipeline {
     private final FileFilter fileFilter;
     private final PrSummaryBuilder summaryBuilder;
     private final FileReviewer fileReviewer;
+    private final MapReduceReviewer mapReduce;
+    private final FindingAggregator aggregator;
 
-    public ReviewPipeline(GitHubPrClient gitHub, PatchParser patchParser,
-                          FileFilter fileFilter, PrSummaryBuilder summaryBuilder, FileReviewer fileReviewer) {
+    public ReviewPipeline(GitHubPrClient gitHub, PatchParser patchParser, FileFilter fileFilter,
+                          PrSummaryBuilder summaryBuilder, FileReviewer fileReviewer,
+                          MapReduceReviewer mapReduce, FindingAggregator aggregator) {
         this.gitHub = gitHub;
         this.patchParser = patchParser;
         this.fileFilter = fileFilter;
         this.summaryBuilder = summaryBuilder;
         this.fileReviewer = fileReviewer;
+        this.mapReduce = mapReduce;
+        this.aggregator = aggregator;
+    }
+
+    /**
+     * 完整审查（对应 MCP tool review_pr）：预处理 → map → reduce。
+     * totalLatencyMs 是整个过程的墙钟时间，包括拉取 GitHub。
+     */
+    public ReviewReport review(String prUrl, ReviewMode mode, ReviewProgressListener listener) {
+        if (mode == ReviewMode.SINGLE) {
+            throw new UnsupportedOperationException("single 模式尚未实现（M5）");
+        }
+        long start = System.nanoTime();
+        PreparedPr pr = prepare(prUrl);
+        listener.onPrepared(pr);
+
+        List<FileReviewResult> results = mapReduce.review(pr.files(), pr.summary(), listener);
+
+        List<Finding> findings = results.stream().flatMap(r -> r.findings().stream()).toList();
+        List<String> failedFiles = results.stream().filter(FileReviewResult::failed).map(FileReviewResult::file).toList();
+        List<CallMetrics> calls = results.stream().flatMap(r -> r.calls().stream()).toList();
+        long wallMs = (System.nanoTime() - start) / 1_000_000;
+
+        return new ReviewReport(mode, prUrl, aggregator.aggregate(findings), failedFiles, pr.skippedFiles(), calls,
+                wallMs,
+                calls.stream().mapToInt(CallMetrics::inputTokens).sum(),
+                calls.stream().mapToInt(CallMetrics::outputTokens).sum());
     }
 
     /** PR 链接 → 拉取 → 过滤 → 解析 patch → 生成摘要。 */

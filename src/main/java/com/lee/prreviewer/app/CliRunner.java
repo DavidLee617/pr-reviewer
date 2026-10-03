@@ -1,5 +1,6 @@
 package com.lee.prreviewer.app;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lee.prreviewer.github.GitHubApiException;
 import com.lee.prreviewer.llm.CallMetrics;
 import com.lee.prreviewer.llm.LlmCallException;
@@ -10,8 +11,16 @@ import com.lee.prreviewer.model.Finding;
 import com.lee.prreviewer.model.FileDiff;
 import com.lee.prreviewer.model.LineType;
 import com.lee.prreviewer.model.PreparedPr;
+import com.lee.prreviewer.model.ReviewMode;
+import com.lee.prreviewer.model.ReviewReport;
 import com.lee.prreviewer.model.SkippedFile;
 import com.lee.prreviewer.pipeline.ReviewPipeline;
+import com.lee.prreviewer.pipeline.ReviewProgressListener;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.ExitCodeGenerator;
 import org.springframework.stereotype.Component;
@@ -30,18 +39,20 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
               java -jar pr-reviewer.jar ping                                   测试 LLM 连通性（打印 token 和耗时）
               java -jar pr-reviewer.jar files --pr <PR链接> [--diff]           预处理：文件列表、跳过列表、PR 摘要
               java -jar pr-reviewer.jar review-file --pr <PR链接> --file <路径>   审查单个文件
-              java -jar pr-reviewer.jar review --pr <PR链接> --mode mapreduce|single [--out report.json]   (M4)
+              java -jar pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   完整审查（默认 mapreduce；single 待 M5）
               java -jar pr-reviewer.jar eval --report report.json --truth ground_truth.json             (M6)
               java -jar pr-reviewer.jar mcp                                    以 MCP stdio server 启动 (M7)
             """; // ≈ C# 11 的原始字符串字面量 """..."""
 
     private final LlmClient llmClient;
     private final ReviewPipeline pipeline;
+    private final ObjectMapper json;
     private int exitCode = 0;
 
-    public CliRunner(LlmClient llmClient, ReviewPipeline pipeline) {
+    public CliRunner(LlmClient llmClient, ReviewPipeline pipeline, ObjectMapper json) {
         this.llmClient = llmClient;
         this.pipeline = pipeline;
+        this.json = json;
     }
 
     @Override
@@ -56,7 +67,8 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
             case "ping" -> ping();
             case "files" -> files(args);
             case "review-file" -> reviewFile(args);
-            case "review", "eval", "mcp" -> notYet(args[0]);
+            case "review" -> review(args);
+            case "eval", "mcp" -> notYet(args[0]);
             default -> {
                 System.out.println("未知命令: " + args[0]);
                 System.out.print(USAGE);
@@ -145,6 +157,101 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
         } catch (IllegalArgumentException | GitHubApiException e) {
             System.out.println("✗ " + e.getMessage());
             return 1;
+        }
+    }
+
+    /**
+     * M4：完整审查。stdout 依次输出：实时进度 → Markdown 报告 → 汇总；--out 时另写完整 JSON。
+     * 有文件审查失败时退出码为 1（报告仍完整输出）。
+     */
+    private int review(String[] args) {
+        String prUrl = option(args, "--pr");
+        if (prUrl == null) {
+            System.out.println("缺少参数：review --pr <PR链接> [--mode mapreduce|single] [--out report.json]");
+            return 2;
+        }
+        String modeArg = Optional.ofNullable(option(args, "--mode")).orElse("mapreduce");
+        ReviewMode mode;
+        try {
+            mode = ReviewMode.valueOf(modeArg.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            System.out.println("--mode 只能是 mapreduce 或 single，收到: " + modeArg);
+            return 2;
+        }
+        String out = option(args, "--out");
+
+        ConsoleProgress progress = new ConsoleProgress();
+        ReviewReport report;
+        try {
+            report = pipeline.review(prUrl, mode, progress);
+        } catch (IllegalArgumentException | GitHubApiException | UnsupportedOperationException e) {
+            System.out.println("✗ " + e.getMessage());
+            return 1;
+        }
+
+        System.out.println();
+        System.out.print(MarkdownReport.render(report));
+
+        System.out.printf("%n== 汇总%n");
+        System.out.printf("findings  %d（%s）%n", report.findings().size(), MarkdownReport.severityCounts(report.findings()));
+        System.out.printf("文件      审查 %d · 失败 %d · 跳过 %d%n",
+                progress.total, report.failedFiles().size(), report.skippedFiles().size());
+        System.out.printf("LLM       %d 次调用 · in=%d out=%d%n",
+                report.calls().size(), report.totalInputTokens(), report.totalOutputTokens());
+        System.out.printf("耗时      %.1fs（墙钟）%n", report.totalLatencyMs() / 1000.0);
+
+        if (out != null) {
+            try {
+                json.writerWithDefaultPrettyPrinter().writeValue(Path.of(out).toFile(), report);
+                System.out.println("已写出 " + Path.of(out).toAbsolutePath());
+            } catch (IOException e) {
+                System.out.println("✗ 写出 " + out + " 失败: " + e);
+                return 1;
+            }
+        }
+        return report.failedFiles().isEmpty() ? 0 : 1;
+    }
+
+    /** 打印 [3/11] service/OrderService.java  in=3242 out=909  4.5s  ✓ 形式的进度行。 */
+    private static final class ConsoleProgress implements ReviewProgressListener {
+        private int total;
+        private String commonPrefix = "";
+        private int pathWidth;
+
+        @Override
+        public void onPrepared(PreparedPr pr) {
+            total = pr.files().size();
+            List<String> paths = pr.files().stream().map(FileDiff::path).toList();
+            commonPrefix = commonDirPrefix(paths);
+            pathWidth = paths.stream().mapToInt(p -> p.length() - commonPrefix.length()).max().orElse(0);
+            System.out.printf("审查 %d 个文件（跳过 %d）%s%n", total, pr.skippedFiles().size(),
+                    commonPrefix.isEmpty() ? "" : "，路径相对 " + commonPrefix);
+        }
+
+        @Override
+        public void onFileReviewed(int done, int total, FileReviewResult r) {
+            // 一个文件可能有多次调用（JSON 重试），合计显示
+            int in = r.calls().stream().mapToInt(CallMetrics::inputTokens).sum();
+            int outTokens = r.calls().stream().mapToInt(CallMetrics::outputTokens).sum();
+            long ms = r.calls().stream().mapToLong(CallMetrics::latencyMs).sum();
+            String width = String.valueOf(String.valueOf(total).length());
+            String status = r.failed() ? "✗ " + r.error() : "✓ " + r.findings().size() + " findings";
+            System.out.printf("[%" + width + "d/%d] %-" + Math.max(pathWidth, 1) + "s  in=%d out=%d  %.1fs  %s%n",
+                    done, total, r.file().substring(commonPrefix.length()), in, outTokens, ms / 1000.0, status);
+        }
+
+        /** 所有路径共同的目录前缀（以 / 结尾），用于缩短进度行。 */
+        static String commonDirPrefix(List<String> paths) {
+            if (paths.size() < 2) {
+                return "";
+            }
+            String prefix = paths.get(0);
+            for (String p : paths) {
+                while (!p.startsWith(prefix)) {
+                    prefix = prefix.substring(0, prefix.length() - 1);
+                }
+            }
+            return prefix.substring(0, prefix.lastIndexOf('/') + 1);
         }
     }
 
