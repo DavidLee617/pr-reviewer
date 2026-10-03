@@ -1,250 +1,237 @@
-# pr-reviewer 开发记录
+# pr-reviewer 交接文档
 
-> 记录截至 2026-10-02 的全部进展、决定和待办，用于下次接着做。
-> 设计文档：[config/DESIGN.md](config/DESIGN.md)（v1.4）｜使用说明：[README.md](README.md)
+> 截至 2026-10-02。本文件是新会话的起点。`SESSION-history.md` 是更早的开发流水账，仅作历史保留，内容已全部并入本文件，不必再读。
+> 读完本文件和第 1 节列出的文件，就能接手当前进度。
 
 ---
 
-## 1. 当前状态一览
+## 0. 给新会话的工作约定
+
+- **一律用中文回答**，包括总结和进度说明。代码标识符、命令、文件名保持原样。
+- 用户有 C# / .NET 背景。代码注释里的「C# 对照」是给用户看的，新写的代码保持这个风格（注释密度和措辞与周围一致）。
+- `config/DESIGN.md` 是需求来源：按里程碑实现；**不加设计没要求的功能**；文档与实际环境冲突时先提出来，不要自行替换；依赖版本先查 Maven Central，**不要凭记忆写版本号**。
+- 修改了设计（数据模型、规则、匹配口径等）要同步更新 `config/DESIGN.md`，并在本文件的"决定"表里记一笔原因。
+- **密钥**：`config/application.yml` 里有 DeepSeek key 和 GitHub token，已被 `.gitignore` 排除。不要打印、不要提交、不要写进任何其他文件；用户如果在对话里贴密钥，提醒他直接改文件。
+- **git**：当前所有工作在 `m4-mapreduce` 分支。提交前确认暂存内容里没有密钥（`git diff --cached | grep -E 'sk-|github_pat_'`）。提交信息结尾加 `Co-Authored-By` 行。推送、合并到 main 之前先问用户。
+- 用户的全局 gitignore（`~/.config/git/ignore`）排除了 `.claude/settings.local.json`，这是用户的设置，不要改。
+
+---
+
+## 1. 新会话要读的文件（按顺序）
+
+| 顺序 | 文件 | 看什么 |
+|---|---|---|
+| 1 | `config/DESIGN.md`（v1.4） | 需求、数据模型（第 5 节）、各模块设计、评估口径（第 9 节）、里程碑（第 12 节）、明确不做的事（第 13 节） |
+| 2 | `README.md` | 环境变量、所有命令的用法、MCP 客户端配置、C# 对照速查表 |
+| 3 | `src/main/resources/application.yml` | 默认配置：并发 4、重试 2、摘要上限 1500 token、temperature 0、文件过滤规则、MCP server 默认关闭 |
+| 4 | `src/main/resources/prompts/system.md` | 系统提示（角色、只审新增行、行号规则、严重程度定义、JSON 输出格式） |
+| 5 | `src/main/resources/rules/*.md` | 五套审查规则：security / logic / perf / style / naming（相当于原系统的 skill） |
+| 6 | `ground_truth.json` | bookmarket PR #1 的标准答案（19 个埋点），格式见 DESIGN 第 9 节 |
+| 7 | `src/main/java/com/lee/prreviewer/pipeline/ReviewPipeline.java` | 整条流水线的入口，从这里往下读最快 |
+| 按需 | `config/application.yml` | 本地密钥配置。**只确认它存在，不要输出内容** |
+
+---
+
+## 2. 项目是什么
+
+对一个 GitHub PR 做代码审查的 Java 程序（Spring Boot 3.5.16 + Spring AI 1.1.8，JDK 21，Maven）。被审查的目标仓库是用户的 bookmarket（Java / Spring Boot）。
+
+**背景**：用户在西门子用过一套"Agent + skill + PowerShell 脚本"的审查方式——一个 Agent 自己跑脚本拉 diff、读 skill 文件、把整个 PR 放进自己的上下文一次审完。PR 一大，上下文撑满，靠后的文件审得差。
+
+**本项目的做法**：把那套拆开，固定流程写成 Java 代码（Workflow，不是 Agent）：
+
+```
+PR 链接 → 拉 PR（GitHub REST）→ 过滤 / 解析 patch / 标新文件行号 → 生成 PR 摘要
+  → Map：每个文件单独调用一次 LLM（4 个并发），输入 = 系统提示 + 五套规则 + PR 摘要 + 该文件 diff
+  → Reduce：纯代码去重、排序
+  → ReviewReport（findings、失败/跳过文件、errors、每次调用的 token 和耗时）
+```
+
+- **mapreduce 模式**（主）：每次调用的上下文大小与 PR 规模无关。
+- **single 模式**（baseline）：整个 PR 一次调用，相当于原来的 Agent 做法，用于对比实验。
+- **评估**：对照人工埋雷的标准答案算召回，重点看"按文件在 PR 中的位置分前 / 中 / 后三段"的召回差异。
+
+**几个容易混淆的概念**（用户问过，回答时保持一致）：
+- **DeepSeek 不是 Agent**：它没有工具、不决定流程，每次调用只是"输入一个文件的 diff + 规则，输出 findings JSON"。审哪个文件、怎么汇总全由 Java 代码决定。
+- **MCP tools 是给 Agent 用的，不是给 DeepSeek 用的**：`mcp` 模式下 jar 作为 MCP server，由 MCP 客户端（Claude Code、Claude Desktop、VSCode Copilot）作为子进程启动，通过 stdin/stdout 通信。Agent（如 Claude）负责理解用户意图、把请求翻译成 tool 调用、解读返回的报告；中间的审查流水线由 jar 完成，内部调用 DeepSeek。
+- **两种用法**：命令行（主要用法，做实验用这个，不需要任何 Agent）；MCP（可选，在聊天里让 Agent 调用）。
+
+---
+
+## 3. 当前状态
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | 骨架、配置、数据模型、LlmClient + 计量 | ✅ 已完成，真实调通 DeepSeek |
-| M2 | PR 链接解析、GitHub 拉取、patch 解析、过滤、PR 摘要 | ✅ 已完成，用 PR #1 和 dotnet/eShop#1002 验证 |
-| M3 | 单文件审查、prompt、规则、重试 | ✅ 已完成，PR #1 的 11 个文件全部一次输出合法 JSON |
-| M4 | 并发 map + 去重汇总 + CLI `review` + 报告 | ✅ 已完成，PR #1 跑通（见第 6 节） |
-| M5 | single 模式（baseline）+ 报告错误溯源 | ✅ 已完成，PR #1 跑通（见第 6 节） |
-| M6 | 召回评估 + CLI `eval`；类别加 LOGIC / PERF | ✅ 已完成，PR #1 两种模式都算出召回（见第 6 节） |
-| M7 | MCP server 四个 tool | ✅ 已完成，已登记到 Claude Code（local 范围），用户在新会话中调用 `review_pr` 审查 PR #1 验收通过 |
-| M8 | 写回 PR 评论（可选） | 未开始 |
-| — | 正式实验：50+ 文件的埋雷 PR + 答案 | ⏳ 用户在找 PR |
+| M1 | 骨架、配置、数据模型、LlmClient + 计量 | ✅ |
+| M2 | PR 链接解析、GitHub 拉取（分页）、patch 解析、过滤、PR 摘要 | ✅ |
+| M3 | 单文件审查、prompt、规则、重试 | ✅ |
+| M4 | 并发 map + 去重汇总 + CLI `review` + Markdown 报告 | ✅ |
+| M5 | single 模式 + 报告错误溯源（`errors`） | ✅ |
+| M6 | 召回评估 + CLI `eval`；类别加 LOGIC / PERF | ✅ |
+| M7 | MCP server 四个 tool | ✅ 已登记到 Claude Code 并在真实会话中调用 `review_pr` 验收 |
+| M8（可选） | 审查结果写回 PR 评论 | 未开始 |
+| 正式实验 | 50+ 文件的埋雷 PR + 答案 | 等用户准备 PR |
 
-- 单元测试：99 个，全部通过（`mvn package`）
-- 测试用 PR：https://github.com/DavidLee617/bookmarket/pull/1 （分支 `feature/order-payment-coupon-search`，head `7fd23c0`，12 个文件，11 个 .java）
-- PR #1 的标准答案：`ground_truth.json`（19 个埋点，由用户的人工埋雷文档 `bookmarket-pr1-seeded-bugs.md` 转写）
+- 单元测试 **99 个，全部通过**（`mvn package`）。单测不调用真实 LLM 和 GitHub。
+- **git**：分支 `m4-mapreduce`，相对 main 的提交：
 
----
-
-## 2. 做过的决定（及原因）
-
-| 决定 | 原因 |
+| 提交 | 内容 |
 |---|---|
-| **被审查语言由 C# 改为 Java** | 实际要审的仓库 bookmarket 是 Java（Spring Boot）。DESIGN.md 已同步为 v1.2 |
-| 只审 `**/*.java`，排除 `target/`、`build/`、`generated/`、`generated-sources/` | 三套规则都针对 Java；配置、文档每个都要花一次 LLM 调用却审不出有意义的问题 |
-| PR 摘要上限 500 → **1500** token | 在 50+ 文件的 PR（eShop#1002）上，500 会把全部签名和大部分文件名截掉 |
-| JDK 21 | 设计要求 21；JDK 26 超出 Spring Boot 3.5 支持范围（最高 25）。换到 Mac 后机器默认是 26，已另装 21（见第 3 节） |
-| Spring Boot **3.5.16** + Spring AI **1.1.8** | 设计要求 Boot 3；2026-10-02 查 Maven Central 的最新稳定版。Spring AI 2.x 需要 Boot 4 |
-| LLM 用 DeepSeek（`deepseek-chat`） | 用户指定 |
-| 本地密钥放 `config/application.yml` | Spring Boot 自动加载工作目录下的 `./config/application.yml`；已加入 `.gitignore`，不会打进 jar |
-| 关闭 Spring AI 自带重试，由 LlmClient 自己重试 | Spring AI 默认重试 10 次，会让 `attempts` 计数不准 |
-| 所有日志写 stderr、关闭 banner | CLI 的 stdout 只留给结果；MCP stdio 模式下 stdout 是协议通道 |
-| 规则文件不能参照 PR 内容来写 | 第一版 security.md 不小心写进了 PR 里的场景（请求头固定口令、重复支付、优惠复用），已改成通用写法，否则评估不可信 |
-| 报告新增 `errors`（DESIGN v1.3） | 用户要求：任何一步出问题都要能从报告溯源到环节、文件、具体调用。含已被重试恢复的问题；预处理失败也输出报告 |
-| temperature 固定为 0（`llm.temperature`） | 未设置时同一 PR 两次结果条数不同，召回对比没有意义 |
-| single 整次失败时 `failedFiles` = 全部待审文件 | 一次调用失败等于所有文件都没审到 |
-| single 的系统提示与 map 完全相同，"填 file"的要求写在 user 消息末尾 | 两种模式只差"一次给多少 diff"，对比才公平；也能命中前缀缓存 |
-| 类别加 LOGIC、PERF（DESIGN v1.4） | 埋雷文档的类型是 security / logic / perf / style，19 条里 11 条 logic、1 条 perf；只有三类时逻辑 bug 全归到 STYLE，类别一致率没有意义。从 style.md / security.md 中把逻辑相关的条目移到 logic.md |
-| 命中：±3 行 + **一对一匹配**，类别优先于行距 | ±3 按埋雷文档口径。PR #1 实测：只看位置时一条 finding 会"命中"多个相邻埋点（"库存 `<=`"顺带命中拆箱 NPE），召回被高估（mapreduce 18→17、single 17→14）；行距优先时"返回 User 实体"配到了相邻行的 System.out。"问题本质是否一致"代码判断不了，eval 列出配对原文供人工复核 |
-| #3（application.yml 硬编码 token）保留在答案里 | 文件被 include 规则跳过，任何模式都命中不了。召回分"全部"和"审查范围内"两个口径，如实反映过滤规则的盲区 |
-| 标准答案格式扩展：`locations` 多位置、`categories` 多类别、`severity`、`crossFile` | 跨文件雷涉及两个位置；文档有严重程度和跨文件标记，可分别统计单文件 / 跨文件召回 |
-| 报告加 `headSha`、`prFiles` | 分段需要 PR 原始文件顺序；headSha 用来核对答案的行号是否针对同一提交 |
-| MCP server 默认关闭，只在 `mcp` 命令下打开 | 否则 CLI 命令也会启动 stdio 传输，占用 stdin / stdout |
-| MCP tools 注册成 `SyncToolSpecification`，不是 `ToolCallbackProvider` | 后者会被 Spring AI 的 chat 模型收集为 LLM 工具，tools 又依赖 LLM 流水线 → 循环依赖（启动直接失败）。这些 tool 本来也只给 MCP 客户端用 |
-| MCP `review_file` 返回完整 `FileReviewResult` | 设计原为 `List<Finding>`；改为带 calls / error / errors，失败原因可溯源（与"任何一步出问题都能溯源"的要求一致） |
-| `list_pr_files` 不返回 diff 正文 | 避免把整个 PR 塞进 Agent 上下文，Agent 需要时调 `review_file` |
-| 摘要：v1 保留 | 讨论过"为什么不每次把完整 diff 给 LLM"：成本按"文件数 × PR 大小"增长、单次输入又与 PR 规模挂钩、会重复报问题。摘要是固定小篇幅的跨文件上下文 |
+| `8e1c0f1` | M4 |
+| `a74ae0b` | M5 + 错误溯源 + temperature |
+| `b3dc1b2` | M6 + LOGIC/PERF |
+| `26db3c9` | M7 |
+| `3d84857` | 修正 FINDING_VALIDATION 记录里误导性的空 `file=` |
+| `26317f4` | DESIGN 与实现对齐 |
 
-### 设计之外额外加的东西
+  `main` 只有初始提交 `2995910`（含 M1～M3）。远程 `origin` 已配置，**分支未推送、未合并**。
 
-- CLI 命令 `ping`（M1 验收用）、`files`（≈ MCP 的 `list_pr_files`）、`review-file`（≈ MCP 的 `review_file`）
-- `ReviewPipeline.prepare()` / `reviewFile()`：CLI 和后续 MCP 共用
-- 解析 patch 时去掉 CRLF 的 `\r` 和文件开头的 UTF-8 BOM
-- `FileFilter` 的 include 规则（`review.filter.include-globs`）
-- `review` 的 `--mode` 默认 `mapreduce`；进度行省略所有文件共同的目录前缀；有文件失败时退出码为 1（报告照常输出）
-- `ReviewProgressListener`：进度回调（CLI 打印进度用，MCP 可不传）
+- 测试用 PR：https://github.com/DavidLee617/bookmarket/pull/1 （分支 `feature/order-payment-coupon-search`，head `7fd23c0`，12 个文件，其中 11 个 `.java`）。
 
 ---
 
-## 3. 环境与配置
+## 4. 环境
 
-### 本机环境（Mac，2026-10-02 起）
-- JDK 21：`brew install openjdk@21`（21.0.12.1）。**`~/.zshenv`** 里设置了 `JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` 并放到 `PATH` 最前。放 `.zshenv` 而不是 `.zshrc`，是因为非交互式 shell（Claude 执行的命令、脚本、IDE 任务）不读 `.zshrc`。机器上另有 JDK 26（`/Library/Java/JavaVirtualMachines/jdk-26.jdk`）和 17，不要用
-- Maven 3.9.16（Homebrew）
-- 不需要手动指定 JDK。验证：`java -version`、`mvn -v` 应显示 21.0.12.1
+- **机器**：macOS（Apple Silicon），shell 为 zsh。
+- **JDK 21**：`brew install openjdk@21`（21.0.12.1）。在 **`~/.zshenv`** 里设置了 `JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` 并加到 `PATH` 最前。放 `.zshenv` 是因为非交互式 shell（Claude 执行的命令、脚本）不读 `.zshrc`。`java`、`mvn` 不需要手动指定 JDK。机器上另有 JDK 26 和 17，**不要用 26**（超出 Spring Boot 3.5 支持范围，最高 25）。
+- **Maven** 3.9.16（Homebrew）。
+- **LLM**：DeepSeek，`base-url=https://api.deepseek.com`（不带 `/v1`），`model=deepseek-chat`，temperature 0。
+- **配置文件**：
+  - `src/main/resources/application.yml`：默认配置，打进 jar，密钥从环境变量 `LLM_BASE_URL / LLM_API_KEY / LLM_MODEL / GITHUB_TOKEN` 读。
+  - `config/application.yml`：本地配置（密钥），Spring Boot 自动加载工作目录下的 `./config/application.yml`。缺配置时启动即报错并提示缺哪个。
+- **MCP 已登记到 Claude Code**（local 范围，写在 `~/.claude.json` 的本项目下）：
 
-### 之前的 Windows 环境（备查）
-- JDK 21 在 `D:\Application\jdk21`（用户级 JAVA_HOME；系统级仍是 17）；Maven 在 `C:\tools\apache-maven-3.9.9`
-- 控制台中文 / ✓ 乱码：PowerShell 里先执行 `chcp 65001`
-- VSCode 里出现 "non-project file" 警告：用"文件 → 打开文件夹"直接打开 `pr-reviewer` 目录
+  ```bash
+  claude mcp add --scope local pr-reviewer -- /opt/homebrew/opt/openjdk@21/bin/java -jar /Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar mcp --spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/
+  ```
 
-### 配置文件
-- `src/main/resources/application.yml`：默认配置（打进 jar），密钥全部从环境变量读
-- `config/application.yml`：本地配置，写了 `llm.base-url / api-key / model` 和 `github.token`（**不提交**）
-- 缺少 `LLM_*` 或 `GITHUB_TOKEN` 时启动直接报错退出，并提示缺的是哪个
-
-> ⚠ DeepSeek key 和 GitHub token 在对话里明文出现过（Mac 上配置时又贴过一次新的），建议之后在各自控制台再换一个，**直接改 `config/application.yml`，不要贴进对话**。
+  查看：`claude mcp list` / 会话里 `/mcp`；删除：`claude mcp remove pr-reviewer -s local`。重新 `mvn package` 后，已开着的会话仍连旧进程，要开新会话或在 `/mcp` 里重连。
 
 ---
 
-## 4. 怎么接着用
-
-在 `pr-reviewer` 目录下执行：
+## 5. 常用命令（在项目根目录）
 
 ```bash
-mvn package                                                         # 编译 + 99 个单元测试
-java -jar target/pr-reviewer.jar ping                               # 测 LLM 连通
-java -jar target/pr-reviewer.jar files --pr https://github.com/DavidLee617/bookmarket/pull/1 [--diff]
-java -jar target/pr-reviewer.jar review-file --pr https://github.com/DavidLee617/bookmarket/pull/1 --file OrderService.java
-java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --out report-mapreduce.json
-java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --mode single --out report-single.json
-java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth ground_truth.json
+mvn package                                   # 编译 + 99 个单测，产出 target/pr-reviewer.jar
+java -jar target/pr-reviewer.jar ping         # 测 LLM 连通（打印 token 和耗时）
+java -jar target/pr-reviewer.jar files --pr <PR链接> [--diff]                  # 预处理：文件列表、跳过列表、PR 摘要、带行号的 diff
+java -jar target/pr-reviewer.jar review-file --pr <PR链接> --file OrderService.java   # 审单个文件
+java -jar target/pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]
+java -jar target/pr-reviewer.jar eval --report report.json --truth ground_truth.json
+java -jar target/pr-reviewer.jar mcp          # MCP stdio server（由客户端拉起，不要手动在终端跑）
 ```
 
-MCP 客户端配置见 README 的"MCP server"一节。已用下面的命令登记到 Claude Code（写在 `~/.claude.json` 的本项目下，`claude mcp list` 查看，`claude mcp remove pr-reviewer -s local` 删除）：
-
-```bash
-claude mcp add --scope local pr-reviewer -- /opt/homebrew/opt/openjdk@21/bin/java -jar /Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar mcp --spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/
-```
-
-重新 `mvn package` 后，已开着的会话仍连着旧进程，要开新会话或在 `/mcp` 里重连才会用新 jar。
-
-继续开发时，对 Claude 说"继续做 M8"或"开始正式实验"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
+- 日志全部写 stderr，stdout 只给结果（mcp 模式下 stdout 是协议通道）。
+- `review` 的 stdout：实时进度 → Markdown 报告 → 汇总。预处理失败或有文件审查失败时退出码 1，报告照常输出。
+- `report*.json` 已被 `.gitignore` 排除。
 
 ---
 
-## 5. 代码结构（已实现部分）
+## 6. 代码结构
 
 ```
 src/main/java/com/lee/prreviewer/
-├── PrReviewerApplication.java   入口；非 mcp 命令跑完即退出
-├── app/CliRunner.java           命令：ping / files / review-file / review / eval / mcp（mcp 下不输出任何内容）
-├── app/McpTools.java            四个 MCP tool（@Tool），调用 ReviewPipeline / FindingAggregator
-├── app/McpServerConfig.java     把 McpTools 注册成 SyncToolSpecification
-├── app/MarkdownReport.java      ReviewReport → Markdown（按 severity 分节）
-├── app/EvalReport.java          EvalResult → Markdown
-├── eval/                        RecallEvaluator（±3 行 + 一对一匹配）、GroundTruth、EvalResult
-├── config/                      LlmProperties / GitHubProperties / ReviewProperties（@Validated，缺配置启动失败）
-├── github/                      PrUrlParser、GitHubPrClient（分页拉全、错误带状态码和 message）、PrFile、PrInfo、GitHubApiException
-├── preprocess/                  PatchParser（带行号的 annotatedDiff）、FileFilter、PrSummaryBuilder（Java public 签名启发式 + 截断）
-├── map/                         FileReviewer（行号范围过滤）、JsonRetryingCaller（调用 + JSON 重试 + 生成 ReviewError，map/single 共用）、PromptBuilder、LlmOutputParser、FileReviewResult
-├── pipeline/                    ReviewPipeline（review / prepare / reviewFile）、MapReduceReviewer（固定线程池）、SingleCallReviewer（baseline）、ReviewProgressListener
-├── reduce/FindingAggregator     按 file + line + category 去重保留最高 severity；排序 severity → file → line
-├── llm/                         LlmClient（指数退避重试 + 计量 + 结构化日志）、CallMetrics、LlmResponse、LlmCallException
-└── model/                       设计第 5 节的全部 record / enum（含 v1.3 的 ReviewError、ReviewStage），外加 PreparedPr
+├── PrReviewerApplication   入口；mcp 命令时设系统属性打开 MCP server 并常驻，其他命令跑完即退出
+├── app/                    入口层：CliRunner、MarkdownReport、EvalReport、McpTools（四个 @Tool）、McpServerConfig
+├── config/                 LlmProperties / GitHubProperties / ReviewProperties（@Validated）
+├── github/                 PrUrlParser、GitHubPrClient（分页拉全，错误带状态码、URL 和 GitHub message）
+├── preprocess/             PatchParser（带新文件行号的 annotatedDiff）、FileFilter、PrSummaryBuilder
+├── map/                    FileReviewer（行号范围校验）、JsonRetryingCaller（调用 + JSON 重试 + 生成 ReviewError）、
+│                           PromptBuilder、LlmOutputParser、FileReviewResult
+├── pipeline/               ReviewPipeline、MapReduceReviewer（固定线程池）、SingleCallReviewer、ReviewProgressListener
+├── reduce/                 FindingAggregator
+├── llm/                    LlmClient（指数退避重试 + 计量 + 结构化日志）、CallMetrics、LlmResponse、LlmCallException
+├── eval/                   RecallEvaluator、GroundTruth、EvalResult
+└── model/                  DESIGN 第 5 节的 record / enum（含 ReviewError、ReviewStage）+ PreparedPr
 src/main/resources/
-├── prompts/system.md            系统提示（Java 审查员、行号规则、严重程度、JSON 格式）
+├── application.yml
+├── logback-spring.xml      所有日志 → stderr
+├── prompts/system.md
 └── rules/security.md, logic.md, perf.md, style.md, naming.md
 ```
 
-代码注释里的「C# 对照」说明 Java/Spring 概念在 C#/.NET 中的对应写法（record、IOptions、HttpClient、xUnit、Moq 等），README 末尾有汇总表。
-
 ### 关键实现细节
-- **重试分两层**：API 错误 / 超时由 `LlmClient` 指数退避（1s、2s，最多 `review.max-retries` = 2 次；4xx 不重试，429 重试）；输出不是合法 JSON 由 `JsonRetryingCaller` 带错误信息再调 1 次（label 后缀 ` [json-retry]`）
-- **finding 行号范围**：只接受新增行，以及与新增行相邻的上下文行（跳过中间的删除行判断相邻）；其余丢弃，写 `finding_dropped` 警告日志并记一条 `FINDING_VALIDATION` 错误
-- **错误溯源**：`LlmClient` 把每次失败尝试的错误放进 `LlmResponse.attemptErrors` / `LlmCallException.attemptErrors`；`JsonRetryingCaller` 转成 `ReviewError`（按发生顺序，首次解析失败的"是否已恢复"等重试结果出来后补上）；`ReviewError.describe()` 输出异常类型 + 完整 cause 链
-- **single 模式**：LLM 填的 `file` 先完全匹配，否则接受唯一匹配的路径后缀并补全；进度只有一行 `[1/1] single（N 个文件）`
-- **prompt 结构**：system = 系统提示 + 五套规则；user = PR 摘要 + 本文件 diff。同一 PR 的所有调用前缀相同，DeepSeek 会自动命中前缀缓存
-- **摘要截断**：按约 3 字符/token 估算，超限先删签名再删文件，列表末尾写"已截断"
-- **构造 Prompt 时直接用 SystemMessage / UserMessage**：避免 Java 代码里的 `{}` 被 Spring AI 当成模板占位符
-- **map 并发**：每次 review 新建 `review.concurrency` 大小的线程池（try-with-resources 关闭）；`FileReviewer` 之外的意外异常在任务内兜住，记为该文件失败；结果按输入顺序返回，进度回调串行、按完成顺序编号
-- **totalLatencyMs**：整个 review 的墙钟时间，包括拉取 GitHub 和预处理
-- **eval 匹配**：候选 = 同文件且 ±3 行；所有候选按 类别一致 → 行距 → 埋点顺序 → finding 顺序 排序后贪心配对，一条 finding 只用一次。分段按主位置（`locations[0]`）的文件在 `prFiles` 中的下标三等分。"审查范围内" = 至少一个位置的文件不在 `skippedFiles`
-- **旧报告兼容**：`ReviewReport` 的列表字段缺失时当空列表处理（读 M4/M5 时代的 JSON 不会报错，但没有 `prFiles` 就无法分段，eval 会警告）
+
+- **prompt**：system = `system.md` + 五套规则原文（`PromptBuilder` 拼接）；user = PR 摘要 + 本文件 diff。同一 PR 的所有调用前缀相同，DeepSeek 自动命中前缀缓存。直接构造 `SystemMessage` / `UserMessage`，避免 Java 代码里的 `{}` 被 Spring AI 当模板占位符。
+- **single 模式**：系统提示与 map 完全相同，"每条 finding 必须填 file"的要求写在 user 消息末尾。LLM 填的 file 先完全匹配，否则接受唯一匹配的路径后缀并补全。整次调用失败时 `failedFiles` = 全部待审文件。
+- **重试两层**：`LlmClient` 对 API 错误 / 超时指数退避（1s、2s，最多 2 次；4xx 不重试，429 重试；Spring AI 自带重试已关闭以保证 attempts 计数准确）；`JsonRetryingCaller` 对非法 JSON 带错误信息重调 1 次（label 加后缀 ` [json-retry]`）。map 和 single 共用同一策略。
+- **finding 行号范围**：只接受新增行，以及与新增行紧挨着的上下文行（跨过删除行判断相邻）；其余丢弃，记 `FINDING_VALIDATION` 错误。
+- **错误溯源 `errors`**：`LlmClient` 记录每次失败尝试；`JsonRetryingCaller` 转成 `ReviewError`，按发生顺序（首次解析失败是否"已恢复"要等重试结果出来再补上位置）；`ReviewError.describe()` 输出异常类型 + 完整 cause 链；LLM_OUTPUT 附 LLM 输出开头 300 字；预处理失败不抛异常，返回只含一条 PREPARE 错误的报告。
+- **map 并发**：每次 review 新建 `review.concurrency` 大小的线程池；意外异常在任务内兜住记为 INTERNAL；结果按输入顺序返回；进度回调串行、按完成顺序编号。
+- **去重**：键 `file + line + category`，保留 severity 最高；排序 severity → file → line。
+- **eval 匹配**：候选 = 同文件且 `line ∈ [lineStart-3, lineEnd+3]`；所有候选按 类别一致 → 行距 → 埋点顺序 → finding 顺序 排序后贪心配对，一条 finding 只用一次。分段按主位置（`locations[0]`）文件在报告 `prFiles` 中的下标三等分。"审查范围内" = 至少一个位置的文件没被过滤跳过。读取旧报告时缺失的列表字段按空处理。
+- **MCP**：`spring.ai.mcp.server.enabled` 默认 false，`PrReviewerApplication` 只在 `mcp` 命令下设为 true；tools 注册成 `SyncToolSpecification` bean（**不能**注册成 `ToolCallbackProvider`，否则被 chat 模型收集为 LLM 工具，形成循环依赖、启动失败）；mcp 模式下 `CliRunner` 不向 stdout 写任何东西；MCP Java SDK 0.18.3 的 stdio 只支持协议版本 `2024-11-05`，客户端会自动协商。
 
 ---
 
-## 6. M3 实测结果（PR #1，DeepSeek）
+## 7. 做过的决定及原因
 
-| 文件 | in / out token | 耗时 | 问题数 |
-|---|---|---|---|
-| OrderService.java | 3242 / 909 | 4.5s | 9 |
-| OrderController.java | 2833 / 423 | 2.6s | 5 |
-| AdminController.java | 2415 / 290 | 2.0s | 4 |
-| GlobalExceptionHandler.java | 2263 / 217 | 1.8s | 3 |
-| BookService.java | 2316 / 183 | 1.7s | 2 |
-| 其余 6 个 | 约 2000 / 6 | 约 1s | 0 |
+| 决定 | 原因 |
+|---|---|
+| 被审查语言由 C# 改为 Java | 目标仓库 bookmarket 是 Java |
+| 只审 `**/*.java`，排除 `target/ build/ generated/ generated-sources/` | 规则都针对 Java；配置和文档每个文件都要花一次调用却审不出有意义的问题 |
+| PR 摘要上限 500 → 1500 token | 50+ 文件的 PR（dotnet/eShop#1002）上，500 会截掉全部签名和大部分文件名 |
+| 保留 PR 摘要 | "每次把完整 diff 给 LLM"会让成本按"文件数 × PR 大小"增长、单次输入与 PR 规模挂钩、重复报问题；摘要是固定小篇幅的跨文件上下文 |
+| Spring Boot 3.5.16 + Spring AI 1.1.8 | 设计要求 Boot 3；Spring AI 2.x 需要 Boot 4 |
+| 关闭 Spring AI 自带重试 | 默认重试 10 次，会让 attempts 计数不准 |
+| 所有日志写 stderr、关 banner | CLI 的 stdout 只留给结果；MCP stdio 模式下 stdout 是协议通道 |
+| 规则文件只写通用规则，**不能参照被审查 PR 的内容** | 否则评估不可信（第一版 security.md 不慎写进了 PR 里的场景，已改掉） |
+| 类别加 LOGIC、PERF（五类） | 埋雷文档 19 条里 11 条 logic、1 条 perf；三类时逻辑 bug 全归 STYLE，类别一致率无意义 |
+| temperature 固定 0（`llm.temperature`） | 不设时同一 PR 两次结果条数不同，召回对比无意义 |
+| 报告加 `errors`（ReviewError / ReviewStage） | 用户要求：任何一步出问题都要能从报告溯源到环节、文件、具体调用，包括被重试恢复的 |
+| 报告加 `headSha`、`prFiles` | 分段需要 PR 原始文件顺序；headSha 用来核对答案行号是否针对同一提交 |
+| eval：±3 行 + **一对一匹配**，类别优先于行距 | ±3 按用户埋雷文档口径。只看位置时一条 finding 会"命中"多个相邻埋点，PR #1 上召回被高估（mapreduce 18→17、single 17→14）；行距优先时"返回 User 实体"错配到相邻行的 System.out。副作用：类别一致率偏乐观 |
+| `application.yml` 硬编码 token 的埋点（B03）保留在答案里 | 文件被过滤规则跳过，任何模式都命中不了；召回分"全部"和"审查范围内"两个口径，如实反映盲区 |
+| 标准答案格式扩展（`locations` 多位置、`categories` 多类别、`severity`、`crossFile`） | 跨文件雷涉及两个位置；可分别统计单文件 / 跨文件召回 |
+| MCP `review_file` 返回完整 `FileReviewResult`（设计原为 `List<Finding>`） | 带 calls / error / errors，失败原因可溯源 |
+| MCP `list_pr_files` 不返回 diff 正文 | 避免把整个 PR 塞进 Agent 上下文 |
 
-合计 23 条，全部首次即为合法 JSON，没有行号越界被丢弃的。
-（是否命中埋点要到 M6 对照 `ground_truth.json` 才知道。）
+---
 
-### M4 实测（PR #1，mapreduce，并发 4，JDK 21）
+## 8. 实测数据（PR #1，DeepSeek）
 
-- 11 个文件全部成功，失败 0，跳过 1（`application.yml`，不在 include 范围）
-- 去重排序后 23 条：HIGH 7 / MEDIUM 14 / LOW 2
-- 11 次调用，in=25492 out=2107；**墙钟 9.5s**（各调用耗时之和约 16s）
-- 没有 JSON 重试，没有行号越界被丢弃
-- 库存 `<=` 又被归到 STYLE（待决定 #1）；`OrderService.java:142` 有 SECURITY + STYLE 两条，类别不同按设计不去重
-
-### M5 实测（PR #1，同一个 PR 两种模式）
+**两种模式对比**（五类规则，temperature 0）：
 
 | | mapreduce | single |
 |---|---|---|
 | LLM 调用 | 11 | 1 |
-| 输入 token | 25492 | **6093** |
-| 输出 token | 2107 | 1887 |
-| 墙钟 | 9.5s | 9.7s |
-| findings | 23（7 / 14 / 2） | 21（10 / 9 / 2） |
-
-- single 输入只有约 1/4：mapreduce 每次调用都重复约 2000 token 的系统提示 + 规则（×11）。PR #1 太小，看不出"靠后文件审得更差"，要靠 M6 的 50+ 文件 PR
-- single 中 LLM 填的 file 全部有效，没有被丢弃的 finding
-- 加上 `errors` 后再跑一遍：mapreduce 24 条、single 22 条，两次都没有任何错误。**同一 PR 两次结果数量不同**（见待办 #6）
-- 不存在的 PR（#9999）：报告和 JSON 照常输出，`errors` 里一条 `PREPARE`，含 HTTP 404 和具体 GitHub 接口地址，退出码 1
-
-### M6 实测（PR #1，五类规则，temperature 0，对照 ground_truth.json）
-
-| 口径 | mapreduce | single |
-|---|---|---|
-| findings / 输入 token | 25 / 29067 | 18 / 6418 |
-| 全部召回 | **17 / 19（89.5%）** | **14 / 19（73.7%）** |
+| 输入 / 输出 token | 29067 / 2201 | 6418 / 1622 |
+| 墙钟 | 约 9s | 约 8.5s |
+| findings | 25 | 18 |
+| **召回（全部）** | **17 / 19（89.5%）** | **14 / 19（73.7%）** |
 | 审查范围内 | 17 / 18 | 14 / 18 |
-| 单文件雷 | 15 / 16 | 12 / 16 |
-| 跨文件雷 | 2 / 3 | 2 / 3 |
+| 单文件雷 / 跨文件雷 | 15/16 · 2/3 | 12/16 · 2/3 |
 | HIGH / MEDIUM / LOW | 6/8 · 9/9 · 2/2 | 6/8 · 8/9 · 0/2 |
-| 类别一致率 | 17 / 17 | 14 / 14 |
+| 类别一致率 | 17/17 | 14/14 |
 
-- 两种模式都没找到：B03（application.yml，不在审查范围）、B11（跨文件：`int` 改 `Integer` + `@Min` 对 null 放行 → 拆箱 NPE）
-- single 额外漏掉：B15（魔法值）、B16（命名）、B19（pay 用请求体 userId，IDOR）——single 一条 LOW 都没报
-- 分段：PR #1 的 19 个埋点 14 个在后段、中段只有 1 个，**分段对比没有意义**，要等 50+ 文件的大 PR
-- 未匹配埋点的 finding 主要是 `OrderController` 的 cancel / batchCancel 越权、page/size 未校验等，看起来是真问题但不在答案里（仅参考）
-- 加入五类规则后输入 token 增加约 14%（mapreduce 25492 → 29067）
-
-### M7 实测（自写的 Python stdio 客户端，按 MCP JSON-RPC 协议）
-
-- initialize：server `pr-reviewer 0.1.0`，协议协商为 `2024-11-05`（MCP Java SDK 0.18.3 stdio 只支持这一版，客户端会自动降级）
-- tools/list：四个 tool，参数和必填项正确（`mode` 可选）
-- `list_pr_files` 1.8s：11 个文件 + 跳过 application.yml，headSha 7fd23c0
-- `aggregate_findings`：去重保留 HIGH、排序正确
-- `review_file` 3.2s；不存在的文件返回 `isError=true` + 原始信息"PR 中没有文件 NoSuch.java"
-- `review_pr` 8.4s：11 次调用、23 条 finding、1 条 `FINDING_VALIDATION` 错误（第一次在真实运行中出现 errors，和 stderr 日志一致）；PR #9999 返回含 `PREPARE` 错误的报告
-- stdout 上没有任何非 JSON 行；客户端关闭 stdin 后进程正常退出（exit 0）
-- 从 `/tmp`、无 JAVA_HOME 的最小环境启动（模拟 GUI 客户端），加 `--spring.config.additional-location` 能正常读到密钥
-- CLI 命令（`files`）不受影响，不会启动 MCP server
+- 两种模式都没找到：B03（application.yml，不在审查范围）、B11（跨文件：`int` 改 `Integer` 且 `@Min` 对 null 放行 → 拆箱 NPE）。
+- single 额外漏掉 B15（魔法值）、B16（命名）、B19（pay 用请求体 userId，IDOR）；single 一条 LOW 都没报。
+- single 输入 token 只有 mapreduce 的约 1/4：mapreduce 每次调用重复约 2000+ token 的系统提示和规则。
+- **分段对比在 PR #1 上没有意义**：19 个埋点有 14 个在后段、中段只有 1 个。
+- temperature 0 下同一模式跑两次：single 完全一致；mapreduce 26 条中 24 条（位置 + 类别）一致，差异都是 LOW/MEDIUM。DeepSeek 在 temperature 0 下也不完全确定。
+- 不存在的 PR（#9999）：报告和 JSON 照常输出，`errors` 一条 PREPARE（含 HTTP 404 和具体 GitHub 接口地址），退出码 1。
+- MCP：自写 stdio 客户端验证了握手、四个 tool、错误返回（`isError=true` + 原始信息）、stdout 只有 JSON、stdin 关闭后进程退出；模拟 GUI 客户端（cwd=/tmp、无 JAVA_HOME）加 `--spring.config.additional-location` 能读到密钥；用户在 Claude Code 新会话中调用 `review_pr` 成功。
 
 ---
 
-## 7. 待决定 / 待办
+## 9. 待办 / 待决定
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | ~~是否增加 `LOGIC` 类别~~ 已加 LOGIC、PERF | 见第 2 节 |
-| 2 | 是否加"mapreduce 不带摘要"对照组 | 用来量化摘要的价值；属于设计之外的实验。PR #1 的跨文件召回两种模式都是 2/3，样本太少，等大 PR 再定 |
-| 3 | 准备大 PR 和它的 `ground_truth.json` | PR #1 的答案已有。正式实验的 PR 需 50+ 文件，埋点分散在 PR 文件列表的前 / 中 / 后三段，答案人工维护（设计第 11 节），格式见 DESIGN 第 9 节 |
-| 4 | 更换泄露过的密钥 | 见第 3 节 |
-| 5 | Mockito 自动挂载警告 | 测试时打印 "Mockito is currently self-attaching"，不影响结果；未来 JDK 版本需在 surefire 里配置 `-javaagent` |
-| 7 | 改动行"相邻"范围是否放宽 | 现在只接受新增行和紧挨着的 1 行上下文。MCP 验收时 `OrderController:65`（cancel 接口越权，PR 之前就存在的问题）被丢弃；LLM 有时报 64 行（保留）、有时报 65 行（丢弃），结果不稳定。放宽到 2～3 行会放进更多与本次改动无关的老问题。等大 PR 数据再定 |
-| 8 | 严重程度偏高 | MCP 验收时 15 条 HIGH 里有 double 算金额、全表 findAll 等，答案里是 MEDIUM。可在 system.md 加通用定级指引（性能、精度问题一般为 MEDIUM）。召回不看严重程度，优先级低 |
-| 9 | 跨文件的同一问题不合并 | 如 `OrderController:71` 与 `OrderService:142` 是同一个 batchCancel 越权。去重键是 file + line + category，按设计不合并；语义合并需要 reduce 阶段调用 LLM，设计列为 v2。对召回无影响（一对一匹配只算一次） |
-| 10 | 分支未合并、未推送 | M4～M7 都在 `m4-mapreduce` 分支，main 仍是初始提交 |
-| 6 | ~~是否固定 temperature~~ 已固定为 0 | 新配置 `llm.temperature`（默认 0）。PR #1 各跑两次：single 23 条完全一致；mapreduce 26 条中 24 条（位置 + 类别）一致，差异都是 LOW/MEDIUM。DeepSeek 在 temperature=0 下也不完全确定，M6 若要更稳可每种模式跑 2–3 次看命中是否一致 |
+| 1 | **准备正式实验的 PR**（用户） | 50+ 文件，埋点分散在 PR 文件列表的前 / 中 / 后三段。答案由用户写成文档（参考 PR #1 的埋雷文档格式：文件:行、类型、严重、是否跨文件、问题描述），Claude 转成 `ground_truth.json` 并逐条核对行号与 diff。**答案不能由 AI 生成** |
+| 2 | 改动行"相邻"范围是否放宽 | 现在只接受紧挨着新增行的 1 行上下文。MCP 验收时 `OrderController:65`（cancel 接口越权，PR 之前就存在的问题）被丢弃；LLM 有时报 64 行（保留）、有时报 65 行（丢弃）。放宽会放进更多与改动无关的老问题。等大 PR 数据再定 |
+| 3 | 严重程度偏高 | HIGH 里有 double 算金额、全表 findAll 等，答案里是 MEDIUM。可在 `system.md` 加通用定级指引。召回不看严重程度，优先级低 |
+| 4 | 跨文件同一问题不合并 | 如 `OrderController:71` 与 `OrderService:142` 是同一个 batchCancel 越权。按设计不合并（需 reduce 阶段调用 LLM，DESIGN 列为 v2）；对召回无影响 |
+| 5 | 是否加"mapreduce 不带摘要"对照组 | 量化摘要的价值，属设计之外的实验；PR #1 跨文件样本太少，等大 PR 再定 |
+| 6 | 分支合并 / 推送 | M4～M7 都在 `m4-mapreduce`，未推送、未合并；先问用户 |
+| 7 | 更换泄露过的密钥 | DeepSeek key 和 GitHub token 在对话里明文出现过，建议用户在各自控制台换新，直接改 `config/application.yml` |
+| 8 | Mockito 自动挂载警告 | 测试时打印 "Mockito is currently self-attaching"，不影响结果；未来 JDK 需在 surefire 配 `-javaagent` |
+
+只有单测覆盖、真实运行中还没触发过的路径：LLM API 重试、JSON 重试、single 超出上下文失败、GitHub 分页（需 100+ 文件）。不用专门测，跑大 PR 时遇到会记进 `errors`。
 
 ---
 
-## 8. 接下来
+## 10. 下一步
 
-DESIGN 要求的 M1～M7 已全部完成（2026-10-02 对照 DESIGN v1.4 逐节检查过，文档与代码已对齐）。剩下：
-
-1. **正式实验**（用户找 PR）：50+ 文件、埋点分散在前 / 中 / 后三段；答案先写成文档，Claude 转成 `ground_truth.json` 并核对行号；然后两种模式各跑 2–3 次 + eval，重点看分段召回和跨文件召回。依赖它才能验证：
-   - 分段召回（PR #1 的埋点 14/19 在后段，无法验证）
-   - single 模式超出上下文的失败（PR #1 只有约 6000 token）
-2. **M8（可选）**：结果写回 PR 评论（DESIGN 第 12 节）——`POST /pulls/{n}/reviews`，行内评论需在 diff 范围内，CLI 加 `--post-comments`，默认关闭
-3. 只有单测覆盖、真实运行中还没触发过的路径：LLM API 重试、JSON 重试、single 超上下文、GitHub 分页（需 100+ 文件）。不用专门测，跑大 PR 时遇到会记进 `errors`
+1. **正式实验**（用户找到 PR 后）：转写并核对答案 → 两种模式各跑 2～3 次 `review --out` → 对每份报告 `eval` → 重点看分段召回、跨文件召回、single 是否因上下文装不下而失败。
+2. **M8（可选）**：审查结果写回 PR 评论（DESIGN 第 12 节）——`POST /repos/{owner}/{repo}/pulls/{n}/reviews` 一次提交一个 review；每条评论需 `path`、`line`、`side: RIGHT`、head `commit_id`；不在 diff 范围内的 finding 汇总进 review 正文；CLI 加 `--post-comments`，默认关闭。
