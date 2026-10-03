@@ -1,6 +1,6 @@
 # PR Reviewer 设计文档（实现用）
 
-> v1.4｜2026-10-02｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles；MCP 的 review_file 返回完整 FileReviewResult｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
+> v1.4｜2026-10-02｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles；MCP 的 review_file 返回完整 FileReviewResult｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`（不在本仓库）；实现过程中的决定及原因见仓库根目录的 `SESSION.md`。
 
 ---
 
@@ -65,13 +65,19 @@
 
 ```
 com.lee.prreviewer
-├── app/
-│   ├── CliRunner             命令行入口
-│   └── McpServerConfig       MCP server 入口
+├── PrReviewerApplication     程序入口；mcp 命令时打开 MCP server 并常驻，其他命令跑完即退出
+├── app/                      入口层（只做参数翻译和输出，不含审查逻辑）
+│   ├── CliRunner             命令行入口：ping / files / review-file / review / eval / mcp
+│   ├── MarkdownReport        ReviewReport → Markdown
+│   ├── EvalReport            EvalResult → Markdown
+│   ├── McpTools              四个 MCP tool（@Tool），调用 ReviewPipeline / FindingAggregator
+│   └── McpServerConfig       MCP server 入口：把 McpTools 注册成 SyncToolSpecification
+├── config/                   LlmProperties / GitHubProperties / ReviewProperties（@Validated，缺配置启动失败）
 ├── pipeline/
-│   ├── ReviewPipeline        对外统一入口：review(request, mode)
-│   ├── MapReduceReviewer     主模式
-│   └── SingleCallReviewer    baseline 模式
+│   ├── ReviewPipeline        对外统一入口：review(prUrl, mode, listener)、prepare(prUrl)、reviewFile(prUrl, filePath)
+│   ├── MapReduceReviewer     主模式（固定线程池并行 map）
+│   ├── SingleCallReviewer    baseline 模式
+│   └── ReviewProgressListener 进度回调（CLI 打印进度用，MCP 传 NONE）
 ├── github/
 │   ├── GitHubPrClient        拉 PR 信息和文件列表
 │   └── PrUrlParser           解析 PR 链接
@@ -80,20 +86,25 @@ com.lee.prreviewer
 │   ├── FileFilter            过滤规则
 │   └── PrSummaryBuilder      生成 PR 摘要
 ├── map/
-│   ├── FileReviewer          单文件一次 LLM 调用
-│   └── PromptBuilder         组装 prompt（系统提示 + 五套规则 + PR 摘要 + diff）
+│   ├── FileReviewer          单文件一次 LLM 调用 + 行号范围校验
+│   ├── JsonRetryingCaller    一次审查调用 + 非法 JSON 重试 + 生成 ReviewError（map / single 共用）
+│   ├── PromptBuilder         组装 prompt（系统提示 + 五套规则 + PR 摘要 + diff）
+│   └── LlmOutputParser       解析 {"findings": [...]}
 ├── reduce/
 │   └── FindingAggregator     去重、排序（纯代码）
 ├── llm/
-│   ├── LlmClient             封装调用 + 计量
+│   ├── LlmClient             封装调用 + API 错误重试 + 计量
 │   └── CallMetrics
 ├── eval/
-│   └── RecallEvaluator       对照埋点清单算召回
-└── model/                    数据模型
+│   ├── RecallEvaluator       对照埋点清单算召回（±3 行 + 一对一匹配）
+│   ├── GroundTruth           标准答案格式
+│   └── EvalResult
+└── model/                    数据模型（第 5 节）
 
 resources/
+├── application.yml           默认配置（密钥从环境变量读）
 ├── prompts/system.md
-└── rules/style.md, security.md, naming.md, logic.md, perf.md
+└── rules/security.md, logic.md, perf.md, style.md, naming.md
 ```
 
 ### 流程
@@ -302,7 +313,7 @@ PR 摘要提供全局上下文，仅用于理解，不要审查摘要中提到�
 ### 7.1 命令行（v1 主要方式）
 
 ```
-java -jar pr-reviewer.jar review --pr <PR链接> --mode mapreduce|single [--out report.json]
+java -jar pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   # mode 默认 mapreduce
 java -jar pr-reviewer.jar eval --report report.json --truth ground_truth.json
 ```
 
@@ -347,6 +358,15 @@ Tools（按"需要代码执行的操作"拆，不按审查类别拆）：
 spring:
   main:
     web-application-type: none
+  ai:
+    mcp:
+      server:             # M7
+        enabled: false    # 默认关闭，只在 mcp 命令下打开（PrReviewerApplication 设置系统属性）
+        stdio: true
+        name: pr-reviewer
+        type: sync
+        annotation-scanner:
+          enabled: false  # tools 用 @Tool 注册，不用 @McpTool 注解扫描
 llm:
   base-url: ${LLM_BASE_URL}
   api-key: ${LLM_API_KEY}
@@ -424,9 +444,11 @@ review:
 - `FileFilter`：每条排除规则至少一个用例
 - `PrSummaryBuilder`：识别新增和删除的 public 签名
 - `FindingAggregator`：去重保留最高 severity、排序正确
-- `RecallEvaluator`：±2 行边界
+- `RecallEvaluator`：±3 行边界、一对一匹配（埋点密集时一条 finding 不能命中多个埋点）
 - `GitHubPrClient`：用 mock 服务器测试分页、`patch` 缺失
 - `FileReviewer`：用假的 `LlmClient` 测试重试和非法 JSON
+- `ReviewError`（v1.3）：每类错误的记录内容和发生顺序、预处理失败返回报告而不抛异常
+- `McpTools`（M7）：参数处理、四个 tool 的注册；协议层用真实 MCP 客户端验收
 - **单元测试不调真实 LLM 和真实 GitHub**
 
 ---

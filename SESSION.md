@@ -15,7 +15,7 @@
 | M4 | 并发 map + 去重汇总 + CLI `review` + 报告 | ✅ 已完成，PR #1 跑通（见第 6 节） |
 | M5 | single 模式（baseline）+ 报告错误溯源 | ✅ 已完成，PR #1 跑通（见第 6 节） |
 | M6 | 召回评估 + CLI `eval`；类别加 LOGIC / PERF | ✅ 已完成，PR #1 两种模式都算出召回（见第 6 节） |
-| M7 | MCP server 四个 tool | ✅ 已完成，用自写的 stdio 客户端验证四个 tool；**待用户在真实客户端（Claude Desktop / VSCode）验收** |
+| M7 | MCP server 四个 tool | ✅ 已完成，已登记到 Claude Code（local 范围），用户在新会话中调用 `review_pr` 审查 PR #1 验收通过 |
 | M8 | 写回 PR 评论（可选） | 未开始 |
 | — | 正式实验：50+ 文件的埋雷 PR + 答案 | ⏳ 用户在找 PR |
 
@@ -100,7 +100,13 @@ java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/book
 java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth ground_truth.json
 ```
 
-MCP 客户端配置见 README 的"MCP server"一节。
+MCP 客户端配置见 README 的"MCP server"一节。已用下面的命令登记到 Claude Code（写在 `~/.claude.json` 的本项目下，`claude mcp list` 查看，`claude mcp remove pr-reviewer -s local` 删除）：
+
+```bash
+claude mcp add --scope local pr-reviewer -- /opt/homebrew/opt/openjdk@21/bin/java -jar /Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar mcp --spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/
+```
+
+重新 `mvn package` 后，已开着的会话仍连着旧进程，要开新会话或在 `/mcp` 里重连才会用新 jar。
 
 继续开发时，对 Claude 说"继续做 M8"或"开始正式实验"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
 
@@ -225,12 +231,20 @@ src/main/resources/
 | 3 | 准备大 PR 和它的 `ground_truth.json` | PR #1 的答案已有。正式实验的 PR 需 50+ 文件，埋点分散在 PR 文件列表的前 / 中 / 后三段，答案人工维护（设计第 11 节），格式见 DESIGN 第 9 节 |
 | 4 | 更换泄露过的密钥 | 见第 3 节 |
 | 5 | Mockito 自动挂载警告 | 测试时打印 "Mockito is currently self-attaching"，不影响结果；未来 JDK 版本需在 surefire 里配置 `-javaagent` |
+| 7 | 改动行"相邻"范围是否放宽 | 现在只接受新增行和紧挨着的 1 行上下文。MCP 验收时 `OrderController:65`（cancel 接口越权，PR 之前就存在的问题）被丢弃；LLM 有时报 64 行（保留）、有时报 65 行（丢弃），结果不稳定。放宽到 2～3 行会放进更多与本次改动无关的老问题。等大 PR 数据再定 |
+| 8 | 严重程度偏高 | MCP 验收时 15 条 HIGH 里有 double 算金额、全表 findAll 等，答案里是 MEDIUM。可在 system.md 加通用定级指引（性能、精度问题一般为 MEDIUM）。召回不看严重程度，优先级低 |
+| 9 | 跨文件的同一问题不合并 | 如 `OrderController:71` 与 `OrderService:142` 是同一个 batchCancel 越权。去重键是 file + line + category，按设计不合并；语义合并需要 reduce 阶段调用 LLM，设计列为 v2。对召回无影响（一对一匹配只算一次） |
+| 10 | 分支未合并、未推送 | M4～M7 都在 `m4-mapreduce` 分支，main 仍是初始提交 |
 | 6 | ~~是否固定 temperature~~ 已固定为 0 | 新配置 `llm.temperature`（默认 0）。PR #1 各跑两次：single 23 条完全一致；mapreduce 26 条中 24 条（位置 + 类别）一致，差异都是 LOW/MEDIUM。DeepSeek 在 temperature=0 下也不完全确定，M6 若要更稳可每种模式跑 2–3 次看命中是否一致 |
 
 ---
 
 ## 8. 接下来
 
-1. **M7 真实客户端验收**（用户）：按 README 配置 Claude Desktop / VSCode / Claude Code，调用 `review_pr`
-2. **正式实验**（用户找 PR）：50+ 文件、埋点分散在前 / 中 / 后三段；答案先写成文档，Claude 转成 `ground_truth.json` 并核对行号；然后两种模式各跑 2–3 次 + eval，重点看分段召回和跨文件召回
-3. **M8（可选）**：结果写回 PR 评论（DESIGN 第 12 节）——`POST /pulls/{n}/reviews`，行内评论需在 diff 范围内，CLI 加 `--post-comments`，默认关闭
+DESIGN 要求的 M1～M7 已全部完成（2026-10-02 对照 DESIGN v1.4 逐节检查过，文档与代码已对齐）。剩下：
+
+1. **正式实验**（用户找 PR）：50+ 文件、埋点分散在前 / 中 / 后三段；答案先写成文档，Claude 转成 `ground_truth.json` 并核对行号；然后两种模式各跑 2–3 次 + eval，重点看分段召回和跨文件召回。依赖它才能验证：
+   - 分段召回（PR #1 的埋点 14/19 在后段，无法验证）
+   - single 模式超出上下文的失败（PR #1 只有约 6000 token）
+2. **M8（可选）**：结果写回 PR 评论（DESIGN 第 12 节）——`POST /pulls/{n}/reviews`，行内评论需在 diff 范围内，CLI 加 `--post-comments`，默认关闭
+3. 只有单测覆盖、真实运行中还没触发过的路径：LLM API 重试、JSON 重试、single 超上下文、GitHub 分页（需 100+ 文件）。不用专门测，跑大 PR 时遇到会记进 `errors`
