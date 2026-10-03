@@ -7,7 +7,7 @@ import com.lee.prreviewer.model.PreparedPr;
  * 审查进度回调，CLI 用它实时打印进度。
  * <p>
  * mapreduce 模式下 onFileReviewed 来自工作线程，但调用是串行的（同一时刻只有一个），
- * done 按完成顺序从 1 递增到 total。
+ * done 按完成顺序从 1 递增到 total。single 模式只回调一次（1/1），result.file() 为 "single"。
  * C# 对照：≈ IProgress&lt;T&gt;。
  */
 @FunctionalInterface

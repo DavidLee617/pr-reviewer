@@ -2,6 +2,8 @@ package com.lee.prreviewer.llm;
 
 import com.lee.prreviewer.config.LlmProperties;
 import com.lee.prreviewer.config.ReviewProperties;
+import com.lee.prreviewer.model.ReviewError;
+import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,6 +75,7 @@ public class LlmClient {
         long start = System.nanoTime(); // ≈ Stopwatch.GetTimestamp()
         int attempts = 0;
         RuntimeException lastError;
+        List<String> attemptErrors = new ArrayList<>(); // 每次失败尝试一条，写进报告用于溯源
 
         while (true) {
             attempts++;
@@ -88,9 +91,10 @@ public class LlmClient {
                     log.warn("llm_usage_missing label={} — API 未返回 usage，token 记为 0", label);
                 }
                 logCall(metrics, null);
-                return new LlmResponse(content, metrics);
+                return new LlmResponse(content, metrics, attemptErrors);
             } catch (RuntimeException e) {
                 lastError = e;
+                attemptErrors.add("第 " + attempts + " 次尝试失败（" + elapsedMs(start) + "ms）: " + ReviewError.describe(e));
                 if (attempts > maxRetries || !isRetryable(e)) {
                     break;
                 }
@@ -107,7 +111,7 @@ public class LlmClient {
 
         CallMetrics metrics = new CallMetrics(label, 0, 0, elapsedMs(start), false, attempts);
         logCall(metrics, lastError);
-        throw new LlmCallException(metrics, lastError);
+        throw new LlmCallException(metrics, lastError, attemptErrors);
     }
 
     private static String extractContent(ChatResponse response) {

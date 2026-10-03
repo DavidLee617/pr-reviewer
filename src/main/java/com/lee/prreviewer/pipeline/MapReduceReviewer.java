@@ -5,6 +5,8 @@ import com.lee.prreviewer.map.FileReviewResult;
 import com.lee.prreviewer.map.FileReviewer;
 import com.lee.prreviewer.model.FileDiff;
 import com.lee.prreviewer.model.PrSummary;
+import com.lee.prreviewer.model.ReviewError;
+import com.lee.prreviewer.model.ReviewStage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -74,7 +76,9 @@ public class MapReduceReviewer {
         } catch (RuntimeException e) {
             // FileReviewer 已处理 LLM 和 JSON 错误；这里兜住其余意外，保留原始异常信息
             log.error("file_review_failed file={} error=未预期异常", file.path(), e);
-            return new FileReviewResult(file.path(), List.of(), List.of(), "未预期异常: " + e);
+            String detail = ReviewError.describe(e);
+            return new FileReviewResult(file.path(), List.of(), List.of(), "未预期异常: " + detail,
+                    List.of(new ReviewError(ReviewStage.INTERNAL, file.path(), null, false, detail)));
         }
     }
 }

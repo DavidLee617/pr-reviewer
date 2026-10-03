@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn clean *)",
+      "Read(//Users/lee/**)",
+      "Bash(java -version)",
+      "Bash(zsh -lic 'java -version 2>&1 | head -1; mvn -v | grep \"Java version\"')",
+      "Bash(zsh -c 'java -version 2>&1 | head -1')",
+      "Bash(mvn -q test-compile)",
+      "Bash(awk -F'[ ,]+' '{t+=$3; f+=$5+$7} END {print \"total=\"t, \"failures+errors=\"f}')",
+      "Bash(git add *)",
+      "Bash(git check-ignore *)"
+    ],
+    "additionalDirectories": [
+      "/Users/lee"
+    ]
+  }
+}

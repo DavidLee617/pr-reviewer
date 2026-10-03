@@ -12,8 +12,10 @@ import com.lee.prreviewer.model.FileDiff;
 import com.lee.prreviewer.model.Finding;
 import com.lee.prreviewer.model.PrSummary;
 import com.lee.prreviewer.model.PreparedPr;
+import com.lee.prreviewer.model.ReviewError;
 import com.lee.prreviewer.model.ReviewMode;
 import com.lee.prreviewer.model.ReviewReport;
+import com.lee.prreviewer.model.ReviewStage;
 import com.lee.prreviewer.model.ReviewRequest;
 import com.lee.prreviewer.model.SkippedFile;
 import com.lee.prreviewer.preprocess.FileFilter;
@@ -23,6 +25,8 @@ import com.lee.prreviewer.reduce.FindingAggregator;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -34,47 +38,70 @@ import org.springframework.stereotype.Service;
 @Service
 public class ReviewPipeline {
 
+    private static final Logger log = LoggerFactory.getLogger(ReviewPipeline.class);
+
     private final GitHubPrClient gitHub;
     private final PatchParser patchParser;
     private final FileFilter fileFilter;
     private final PrSummaryBuilder summaryBuilder;
     private final FileReviewer fileReviewer;
     private final MapReduceReviewer mapReduce;
+    private final SingleCallReviewer singleCall;
     private final FindingAggregator aggregator;
 
     public ReviewPipeline(GitHubPrClient gitHub, PatchParser patchParser, FileFilter fileFilter,
                           PrSummaryBuilder summaryBuilder, FileReviewer fileReviewer,
-                          MapReduceReviewer mapReduce, FindingAggregator aggregator) {
+                          MapReduceReviewer mapReduce, SingleCallReviewer singleCall, FindingAggregator aggregator) {
         this.gitHub = gitHub;
         this.patchParser = patchParser;
         this.fileFilter = fileFilter;
         this.summaryBuilder = summaryBuilder;
         this.fileReviewer = fileReviewer;
         this.mapReduce = mapReduce;
+        this.singleCall = singleCall;
         this.aggregator = aggregator;
     }
 
     /**
      * 完整审查（对应 MCP tool review_pr）：预处理 → map → reduce。
      * totalLatencyMs 是整个过程的墙钟时间，包括拉取 GitHub。
+     * <p>
+     * 不因预处理失败抛异常：链接非法、GitHub 报错等记为一条 PREPARE 错误，返回只含 errors 的报告，
+     * 保证调用方（CLI --out、MCP）总能拿到可溯源的结果。
      */
     public ReviewReport review(String prUrl, ReviewMode mode, ReviewProgressListener listener) {
-        if (mode == ReviewMode.SINGLE) {
-            throw new UnsupportedOperationException("single 模式尚未实现（M5）");
-        }
         long start = System.nanoTime();
-        PreparedPr pr = prepare(prUrl);
+        PreparedPr pr;
+        try {
+            pr = prepare(prUrl);
+        } catch (RuntimeException e) {
+            log.error("review_prepare_failed prUrl={} error={}", prUrl, e.toString());
+            ReviewError error = new ReviewError(ReviewStage.PREPARE, null, null, false, ReviewError.describe(e));
+            return new ReviewReport(mode, prUrl, List.of(), List.of(), List.of(), List.of(error), List.of(),
+                    (System.nanoTime() - start) / 1_000_000, 0, 0);
+        }
         listener.onPrepared(pr);
 
-        List<FileReviewResult> results = mapReduce.review(pr.files(), pr.summary(), listener);
+        List<FileReviewResult> results;
+        List<String> failedFiles;
+        if (mode == ReviewMode.SINGLE) {
+            FileReviewResult r = singleCall.review(pr.files(), pr.summary());
+            listener.onFileReviewed(1, 1, r);
+            results = List.of(r);
+            // 一次调用失败 = 所有文件都没审到
+            failedFiles = r.failed() ? pr.files().stream().map(FileDiff::path).toList() : List.of();
+        } else {
+            results = mapReduce.review(pr.files(), pr.summary(), listener);
+            failedFiles = results.stream().filter(FileReviewResult::failed).map(FileReviewResult::file).toList();
+        }
 
         List<Finding> findings = results.stream().flatMap(r -> r.findings().stream()).toList();
-        List<String> failedFiles = results.stream().filter(FileReviewResult::failed).map(FileReviewResult::file).toList();
         List<CallMetrics> calls = results.stream().flatMap(r -> r.calls().stream()).toList();
+        List<ReviewError> errors = results.stream().flatMap(r -> r.errors().stream()).toList();
         long wallMs = (System.nanoTime() - start) / 1_000_000;
 
-        return new ReviewReport(mode, prUrl, aggregator.aggregate(findings), failedFiles, pr.skippedFiles(), calls,
-                wallMs,
+        return new ReviewReport(mode, prUrl, aggregator.aggregate(findings), failedFiles, pr.skippedFiles(), errors,
+                calls, wallMs,
                 calls.stream().mapToInt(CallMetrics::inputTokens).sum(),
                 calls.stream().mapToInt(CallMetrics::outputTokens).sum());
     }
@@ -92,7 +119,11 @@ public class ReviewPipeline {
             if (skip.isPresent()) {
                 skipped.add(skip.get());
             } else {
-                files.add(patchParser.parse(f.filename(), ChangeType.fromGitHubStatus(f.status()), f.patch()));
+                try {
+                    files.add(patchParser.parse(f.filename(), ChangeType.fromGitHubStatus(f.status()), f.patch()));
+                } catch (RuntimeException e) {
+                    throw new IllegalStateException("解析 patch 失败: " + f.filename(), e); // 补上文件名，便于溯源
+                }
             }
         }
         PrSummary summary = summaryBuilder.build(info.title(), files);

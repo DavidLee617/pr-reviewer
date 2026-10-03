@@ -1,5 +1,7 @@
 package com.lee.prreviewer.config;
 
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -17,11 +19,14 @@ public record LlmProperties(
         @NotBlank(message = "缺少环境变量 LLM_BASE_URL") String baseUrl,
         @NotBlank(message = "缺少环境变量 LLM_API_KEY") String apiKey,
         @NotBlank(message = "缺少环境变量 LLM_MODEL") String model,
-        @Positive int timeoutSeconds
+        @Positive int timeoutSeconds,
+        // 固定为 0：同一 PR 多次审查结果尽量一致，两种模式的召回对比才有意义（未设置时同一 PR 两次结果条数不同）
+        @DecimalMin("0.0") @DecimalMax("2.0") double temperature
 ) {
     @Override
     public String toString() {
         // 防止 api-key 出现在日志里
-        return "LlmProperties[baseUrl=" + baseUrl + ", model=" + model + ", timeoutSeconds=" + timeoutSeconds + "]";
+        return "LlmProperties[baseUrl=" + baseUrl + ", model=" + model + ", timeoutSeconds=" + timeoutSeconds
+                + ", temperature=" + temperature + "]";
     }
 }

@@ -4,13 +4,13 @@
 
 代码注释里的「C# 对照」说明的是 Java/Spring 概念在 C#/.NET 中的对应写法，方便有 C# 背景的读者理解。
 
-当前进度：**M4**（并发 map + 去重汇总 + CLI `review` + 报告）。
+当前进度：**M5**（mapreduce / single 两种模式 + 报告错误溯源）。
 
 审查规则在 `src/main/resources/rules/`（style / security / naming），系统提示在 `src/main/resources/prompts/system.md`，可直接修改。
 
 ## 环境
 
-- JDK 21（`java -version` 确认）、Maven 3.9+
+- JDK 21（`java -version` 确认；Spring Boot 3.5 最高支持到 25，不要用 26）、Maven 3.9+
 - 技术栈：Spring Boot 3.5.16 + Spring AI 1.1.8
 
 ## 环境变量（必需，缺失时启动即报错退出）
@@ -54,12 +54,17 @@ mvn package                                  # 编译 + 单元测试（不调真
 java -jar target/pr-reviewer.jar ping        # 调通一次 LLM，打印 token 和耗时
 java -jar target/pr-reviewer.jar files --pr <PR链接> [--diff]   # 文件列表、跳过列表、PR 摘要
 java -jar target/pr-reviewer.jar review-file --pr <PR链接> --file OrderService.java   # 审查单个文件
-java -jar target/pr-reviewer.jar review --pr <PR链接> [--mode mapreduce] [--out report.json]   # 完整审查
+java -jar target/pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   # 完整审查
 ```
 
 日志写 stderr，结果写 stdout。
 
-`review` 的 stdout 依次是：实时进度 → Markdown 报告 → 汇总；`--out` 另写完整 `ReviewReport` JSON。有文件审查失败时退出码为 1（报告仍完整输出）。
+`review` 的 stdout 依次是：实时进度 → Markdown 报告 → 汇总；`--out` 另写完整 `ReviewReport` JSON。
+
+- `mapreduce`（默认）：每个文件一次 LLM 调用，并发 `review.concurrency` 个
+- `single`（baseline）：整个 PR 一次调用；超出模型上下文时直接失败、不截断
+
+**问题追踪**：报告的 `errors` 记录过程中所有问题，每条写明环节（`PREPARE` / `LLM_CALL` / `LLM_OUTPUT` / `FINDING_VALIDATION` / `INTERNAL`）、文件、LLM 调用 label（与 stderr 日志一致）、是否已被重试恢复、原始错误信息。预处理失败（链接非法、GitHub 报错）时也照常输出报告和 JSON。预处理失败或有文件审查失败时退出码为 1。
 
 ```
 [ 5/11] controller/OrderController.java   in=2833 out=263  1.9s  ✓ 3 findings

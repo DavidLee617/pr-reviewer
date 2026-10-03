@@ -1,7 +1,7 @@
 # pr-reviewer 开发记录
 
 > 记录截至 2026-10-02 的全部进展、决定和待办，用于下次接着做。
-> 设计文档：[config/DESIGN.md](config/DESIGN.md)（v1.2）｜使用说明：[README.md](README.md)
+> 设计文档：[config/DESIGN.md](config/DESIGN.md)（v1.3）｜使用说明：[README.md](README.md)
 
 ---
 
@@ -13,12 +13,12 @@
 | M2 | PR 链接解析、GitHub 拉取、patch 解析、过滤、PR 摘要 | ✅ 已完成，用 PR #1 和 dotnet/eShop#1002 验证 |
 | M3 | 单文件审查、prompt、三套规则、重试 | ✅ 已完成，PR #1 的 11 个文件全部一次输出合法 JSON |
 | M4 | 并发 map + 去重汇总 + CLI `review` + 报告 | ✅ 已完成，PR #1 跑通（见第 6 节） |
-| **M5** | **single 模式（baseline）** | ⏭ **下一步** |
-| M6 | 召回评估 + CLI `eval` | 未开始 |
+| M5 | single 模式（baseline）+ 报告错误溯源 | ✅ 已完成，PR #1 跑通（见第 6 节） |
+| **M6** | **召回评估 + CLI `eval`** | ⏭ **下一步** |
 | M7 | MCP server 四个 tool | 未开始 |
 | M8 | 写回 PR 评论（可选） | 未开始 |
 
-- 单元测试：76 个，全部通过（`mvn package`）
+- 单元测试：86 个，全部通过（`mvn package`）
 - 测试用 PR：https://github.com/DavidLee617/bookmarket/pull/1 （分支 `feature/order-payment-coupon-search`，12 个文件，11 个 .java）
 
 ---
@@ -37,6 +37,10 @@
 | 关闭 Spring AI 自带重试，由 LlmClient 自己重试 | Spring AI 默认重试 10 次，会让 `attempts` 计数不准 |
 | 所有日志写 stderr、关闭 banner | CLI 的 stdout 只留给结果；MCP stdio 模式下 stdout 是协议通道 |
 | 规则文件不能参照 PR 内容来写 | 第一版 security.md 不小心写进了 PR 里的场景（请求头固定口令、重复支付、优惠复用），已改成通用写法，否则评估不可信 |
+| 报告新增 `errors`（DESIGN v1.3） | 用户要求：任何一步出问题都要能从报告溯源到环节、文件、具体调用。含已被重试恢复的问题；预处理失败也输出报告 |
+| temperature 固定为 0（`llm.temperature`） | 未设置时同一 PR 两次结果条数不同，召回对比没有意义 |
+| single 整次失败时 `failedFiles` = 全部待审文件 | 一次调用失败等于所有文件都没审到 |
+| single 的系统提示与 map 完全相同，"填 file"的要求写在 user 消息末尾 | 两种模式只差"一次给多少 diff"，对比才公平；也能命中前缀缓存 |
 | 摘要：v1 保留 | 讨论过"为什么不每次把完整 diff 给 LLM"：成本按"文件数 × PR 大小"增长、单次输入又与 PR 规模挂钩、会重复报问题。摘要是固定小篇幅的跨文件上下文 |
 
 ### 设计之外额外加的东西
@@ -53,9 +57,9 @@
 ## 3. 环境与配置
 
 ### 本机环境（Mac，2026-10-02 起）
-- JDK 21：`brew install openjdk@21`（21.0.12.1）。`~/.zshrc` 末尾设置了 `JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` 并放到 `PATH` 最前。机器上另有 JDK 26（`/Library/Java/JavaVirtualMachines/jdk-26.jdk`）和 17，不要用
+- JDK 21：`brew install openjdk@21`（21.0.12.1）。**`~/.zshenv`** 里设置了 `JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` 并放到 `PATH` 最前。放 `.zshenv` 而不是 `.zshrc`，是因为非交互式 shell（Claude 执行的命令、脚本、IDE 任务）不读 `.zshrc`。机器上另有 JDK 26（`/Library/Java/JavaVirtualMachines/jdk-26.jdk`）和 17，不要用
 - Maven 3.9.16（Homebrew）
-- 已打开的终端需重开或 `source ~/.zshrc` 才会用 21。验证：`java -version`、`mvn -v`
+- 不需要手动指定 JDK。验证：`java -version`、`mvn -v` 应显示 21.0.12.1
 
 ### 之前的 Windows 环境（备查）
 - JDK 21 在 `D:\Application\jdk21`（用户级 JAVA_HOME；系统级仍是 17）；Maven 在 `C:\tools\apache-maven-3.9.9`
@@ -76,14 +80,15 @@
 在 `pr-reviewer` 目录下执行：
 
 ```bash
-mvn package                                                         # 编译 + 76 个单元测试
+mvn package                                                         # 编译 + 86 个单元测试
 java -jar target/pr-reviewer.jar ping                               # 测 LLM 连通
 java -jar target/pr-reviewer.jar files --pr https://github.com/DavidLee617/bookmarket/pull/1 [--diff]
 java -jar target/pr-reviewer.jar review-file --pr https://github.com/DavidLee617/bookmarket/pull/1 --file OrderService.java
 java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --out report.json
+java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --mode single --out report-single.json
 ```
 
-继续开发时，对 Claude 说"继续做 M5"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
+继续开发时，对 Claude 说"继续做 M6"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
 
 ---
 
@@ -97,11 +102,11 @@ src/main/java/com/lee/prreviewer/
 ├── config/                      LlmProperties / GitHubProperties / ReviewProperties（@Validated，缺配置启动失败）
 ├── github/                      PrUrlParser、GitHubPrClient（分页拉全、错误带状态码和 message）、PrFile、PrInfo、GitHubApiException
 ├── preprocess/                  PatchParser（带行号的 annotatedDiff）、FileFilter、PrSummaryBuilder（Java public 签名启发式 + 截断）
-├── map/                         FileReviewer（JSON 重试、行号范围过滤）、PromptBuilder、LlmOutputParser、FileReviewResult
-├── pipeline/                    ReviewPipeline（review / prepare / reviewFile）、MapReduceReviewer（固定线程池）、ReviewProgressListener
+├── map/                         FileReviewer（行号范围过滤）、JsonRetryingCaller（调用 + JSON 重试 + 生成 ReviewError，map/single 共用）、PromptBuilder、LlmOutputParser、FileReviewResult
+├── pipeline/                    ReviewPipeline（review / prepare / reviewFile）、MapReduceReviewer（固定线程池）、SingleCallReviewer（baseline）、ReviewProgressListener
 ├── reduce/FindingAggregator     按 file + line + category 去重保留最高 severity；排序 severity → file → line
 ├── llm/                         LlmClient（指数退避重试 + 计量 + 结构化日志）、CallMetrics、LlmResponse、LlmCallException
-└── model/                       设计第 5 节的全部 record / enum，外加 PreparedPr
+└── model/                       设计第 5 节的全部 record / enum（含 v1.3 的 ReviewError、ReviewStage），外加 PreparedPr
 src/main/resources/
 ├── prompts/system.md            系统提示（Java 审查员、行号规则、严重程度、JSON 格式）
 └── rules/style.md, security.md, naming.md
@@ -110,8 +115,10 @@ src/main/resources/
 代码注释里的「C# 对照」说明 Java/Spring 概念在 C#/.NET 中的对应写法（record、IOptions、HttpClient、xUnit、Moq 等），README 末尾有汇总表。
 
 ### 关键实现细节
-- **重试分两层**：API 错误 / 超时由 `LlmClient` 指数退避（1s、2s，最多 `review.max-retries` = 2 次；4xx 不重试，429 重试）；输出不是合法 JSON 由 `FileReviewer` 带错误信息再调 1 次（label 后缀 ` [json-retry]`）
-- **finding 行号范围**：只接受新增行，以及与新增行相邻的上下文行（跳过中间的删除行判断相邻）；其余丢弃并写 `finding_dropped` 警告日志
+- **重试分两层**：API 错误 / 超时由 `LlmClient` 指数退避（1s、2s，最多 `review.max-retries` = 2 次；4xx 不重试，429 重试）；输出不是合法 JSON 由 `JsonRetryingCaller` 带错误信息再调 1 次（label 后缀 ` [json-retry]`）
+- **finding 行号范围**：只接受新增行，以及与新增行相邻的上下文行（跳过中间的删除行判断相邻）；其余丢弃，写 `finding_dropped` 警告日志并记一条 `FINDING_VALIDATION` 错误
+- **错误溯源**：`LlmClient` 把每次失败尝试的错误放进 `LlmResponse.attemptErrors` / `LlmCallException.attemptErrors`；`JsonRetryingCaller` 转成 `ReviewError`（按发生顺序，首次解析失败的"是否已恢复"等重试结果出来后补上）；`ReviewError.describe()` 输出异常类型 + 完整 cause 链
+- **single 模式**：LLM 填的 `file` 先完全匹配，否则接受唯一匹配的路径后缀并补全；进度只有一行 `[1/1] single（N 个文件）`
 - **prompt 结构**：system = 系统提示 + 三套规则；user = PR 摘要 + 本文件 diff。同一 PR 的所有调用前缀相同，DeepSeek 会自动命中前缀缓存
 - **摘要截断**：按约 3 字符/token 估算，超限先删签名再删文件，列表末尾写"已截断"
 - **构造 Prompt 时直接用 SystemMessage / UserMessage**：避免 Java 代码里的 `{}` 被 Spring AI 当成模板占位符
@@ -142,6 +149,21 @@ src/main/resources/
 - 没有 JSON 重试，没有行号越界被丢弃
 - 库存 `<=` 又被归到 STYLE（待决定 #1）；`OrderService.java:142` 有 SECURITY + STYLE 两条，类别不同按设计不去重
 
+### M5 实测（PR #1，同一个 PR 两种模式）
+
+| | mapreduce | single |
+|---|---|---|
+| LLM 调用 | 11 | 1 |
+| 输入 token | 25492 | **6093** |
+| 输出 token | 2107 | 1887 |
+| 墙钟 | 9.5s | 9.7s |
+| findings | 23（7 / 14 / 2） | 21（10 / 9 / 2） |
+
+- single 输入只有约 1/4：mapreduce 每次调用都重复约 2000 token 的系统提示 + 规则（×11）。PR #1 太小，看不出"靠后文件审得更差"，要靠 M6 的 50+ 文件 PR
+- single 中 LLM 填的 file 全部有效，没有被丢弃的 finding
+- 加上 `errors` 后再跑一遍：mapreduce 24 条、single 22 条，两次都没有任何错误。**同一 PR 两次结果数量不同**（见待办 #6）
+- 不存在的 PR（#9999）：报告和 JSON 照常输出，`errors` 里一条 `PREPARE`，含 HTTP 404 和具体 GitHub 接口地址，退出码 1
+
 ---
 
 ## 7. 待决定 / 待办
@@ -153,16 +175,19 @@ src/main/resources/
 | 3 | 准备 `ground_truth.json` | 人工维护（设计第 11 节），不能由同一模型生成。实验目标 PR 需 50+ 文件，埋点分布在前 / 中 / 后三段 |
 | 4 | 更换泄露过的密钥 | 见第 3 节 |
 | 5 | Mockito 自动挂载警告 | 测试时打印 "Mockito is currently self-attaching"，不影响结果；未来 JDK 版本需在 surefire 里配置 `-javaagent` |
+| 6 | ~~是否固定 temperature~~ 已固定为 0 | 新配置 `llm.temperature`（默认 0）。PR #1 各跑两次：single 23 条完全一致；mapreduce 26 条中 24 条（位置 + 类别）一致，差异都是 LOW/MEDIUM。DeepSeek 在 temperature=0 下也不完全确定，M6 若要更稳可每种模式跑 2–3 次看命中是否一致 |
 
 ---
 
-## 8. M5 要做什么（下一步）
+## 8. M6 要做什么（下一步）
 
-按 DESIGN.md 第 6.7、12 节：
+按 DESIGN.md 第 9、12 节：
 
-1. `SingleCallReviewer`：一次调用，输入 = 同样的系统提示 + 三套规则 + PR 摘要 + **所有文件** `annotatedDiff` 拼接；label 为 `single`
-2. 输出格式同 map，但每个 finding 由 LLM 填 `file`（需要单独的 prompt 说明 / 解析时要求 file 字段）；file 不在 PR 文件列表中、或行号不在该文件改动范围的 finding 丢弃并记警告
-3. 超出模型上下文时**不要截断**，记录失败和报错信息（"装不下"本身就是实验结果）——整次调用失败时 `failedFiles` 怎么填需要定
-4. `ReviewPipeline.review()` 去掉 SINGLE 的 `UnsupportedOperationException`，同样走 `FindingAggregator`
-5. CLI：single 模式只有一次调用，进度显示需调整（目前进度是按文件回调的）
-6. 验收：single 模式跑通 PR #1，和 mapreduce 的 token / 耗时 / finding 数对比
+1. `eval/RecallEvaluator`：读 `ReviewReport` JSON + `ground_truth.json`（`id / file / lineStart / lineEnd / category / note`）
+2. 命中规则：存在 finding 的 `file` 相同且 `line` ∈ `[lineStart - 2, lineEnd + 2]`；category 不要求一致，单独统计一致率
+3. 输出：总召回、每个埋点的命中情况、**按文件在 PR 文件列表中的位置分前 / 中 / 后三段**的召回、未匹配任何埋点的 finding 数
+   - 分段需要 PR 文件顺序：报告里目前没有，要定是从 GitHub 重新拉，还是在 `ReviewReport` 里加文件列表
+4. CLI `eval --report report.json --truth ground_truth.json`
+5. 单测：±2 行边界
+6. 前置：`ground_truth.json` 需人工准备（待办 #3）
+7. 验收：两种模式都能算出召回和分段召回

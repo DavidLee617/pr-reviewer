@@ -1,6 +1,7 @@
 package com.lee.prreviewer.map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
@@ -19,6 +20,8 @@ import com.lee.prreviewer.model.ChangeType;
 import com.lee.prreviewer.model.FileDiff;
 import com.lee.prreviewer.model.Finding;
 import com.lee.prreviewer.model.PrSummary;
+import com.lee.prreviewer.model.ReviewError;
+import com.lee.prreviewer.model.ReviewStage;
 import com.lee.prreviewer.model.Severity;
 import com.lee.prreviewer.preprocess.PatchParser;
 import java.util.List;
@@ -49,8 +52,9 @@ class FileReviewerTest {
     private static final PrSummary SUMMARY = new PrSummary("Add payment", List.of(PATH + " (MODIFIED)"), List.of());
 
     private final LlmClient llm = mock(LlmClient.class);
-    private final FileReviewer reviewer =
-            new FileReviewer(llm, new PromptBuilder(), new LlmOutputParser(new ObjectMapper()));
+    private final PromptBuilder prompts = new PromptBuilder();
+    private final FileReviewer reviewer = new FileReviewer(
+            new JsonRetryingCaller(llm, prompts, new LlmOutputParser(new ObjectMapper())), prompts);
 
     private static LlmResponse response(String content, String label) {
         return new LlmResponse(content, new CallMetrics(label, 100, 20, 50, true, 1));
@@ -74,15 +78,23 @@ class FileReviewerTest {
     void retriesOnceWithErrorMessageWhenJsonInvalid() {
         when(llm.call(eq(PATH), anyString(), anyString()))
                 .thenReturn(response("好的，以下是审查结果：findings 为空", PATH));
-        when(llm.call(eq(PATH + FileReviewer.JSON_RETRY_SUFFIX), anyString(), contains("无法解析")))
-                .thenReturn(response("```json\n{\"findings\": []}\n```", PATH + FileReviewer.JSON_RETRY_SUFFIX));
+        when(llm.call(eq(PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX), anyString(), contains("无法解析")))
+                .thenReturn(response("```json\n{\"findings\": []}\n```", PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX));
 
         FileReviewResult r = reviewer.review(DIFF, SUMMARY);
 
         assertThat(r.failed()).isFalse();
         assertThat(r.findings()).isEmpty();
         assertThat(r.calls()).extracting(CallMetrics::label)
-                .containsExactly(PATH, PATH + FileReviewer.JSON_RETRY_SUFFIX);
+                .containsExactly(PATH, PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX);
+        // 首次解析失败记为已恢复，附带原始输出开头
+        assertThat(r.errors()).singleElement().satisfies(e -> {
+            assertThat(e.stage()).isEqualTo(ReviewStage.LLM_OUTPUT);
+            assertThat(e.file()).isEqualTo(PATH);
+            assertThat(e.callLabel()).isEqualTo(PATH);
+            assertThat(e.recovered()).isTrue();
+            assertThat(e.message()).contains("输出中没有 JSON", "好的，以下是审查结果");
+        });
     }
 
     @Test
@@ -95,20 +107,47 @@ class FileReviewerTest {
         assertThat(r.failed()).isTrue();
         assertThat(r.error()).contains("两次均无法解析").contains("category");
         assertThat(r.calls()).hasSize(2);
+        assertThat(r.errors()).extracting(ReviewError::stage, ReviewError::callLabel, ReviewError::recovered)
+                .containsExactly(
+                        tuple(ReviewStage.LLM_OUTPUT, PATH, false),
+                        tuple(ReviewStage.LLM_OUTPUT, PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX, false));
+    }
+
+    @Test
+    void retriedApiErrorsAreRecordedInOrder() {
+        // 首次调用：前两次尝试失败后成功，但输出非法；JSON 重试：成功
+        when(llm.call(eq(PATH), anyString(), anyString())).thenReturn(new LlmResponse("不是 JSON",
+                new CallMetrics(PATH, 100, 20, 3000, true, 3), List.of("第 1 次尝试失败: 503", "第 2 次尝试失败: 503")));
+        when(llm.call(eq(PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX), anyString(), anyString()))
+                .thenReturn(response("{\"findings\": []}", PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX));
+
+        FileReviewResult r = reviewer.review(DIFF, SUMMARY);
+
+        assertThat(r.failed()).isFalse();
+        assertThat(r.errors()).extracting(ReviewError::stage, ReviewError::recovered).containsExactly(
+                tuple(ReviewStage.LLM_CALL, true),
+                tuple(ReviewStage.LLM_CALL, true),
+                tuple(ReviewStage.LLM_OUTPUT, true));
     }
 
     @Test
     void apiFailureIsRecordedAndNotRetriedAsJson() {
         CallMetrics failedMetrics = new CallMetrics(PATH, 0, 0, 3000, false, 3);
         when(llm.call(anyString(), anyString(), anyString()))
-                .thenThrow(new LlmCallException(failedMetrics, new RuntimeException("HTTP 503")));
+                .thenThrow(new LlmCallException(failedMetrics, new RuntimeException("HTTP 503"),
+                        List.of("第 1 次尝试失败: HTTP 503", "第 2 次尝试失败: HTTP 503", "第 3 次尝试失败: HTTP 503")));
 
         FileReviewResult r = reviewer.review(DIFF, SUMMARY);
 
         assertThat(r.failed()).isTrue();
         assertThat(r.error()).contains("HTTP 503");
         assertThat(r.calls()).containsExactly(failedMetrics);
-        verify(llm, never()).call(eq(PATH + FileReviewer.JSON_RETRY_SUFFIX), anyString(), anyString());
+        assertThat(r.errors()).hasSize(3)
+                .allSatisfy(e -> {
+                    assertThat(e.stage()).isEqualTo(ReviewStage.LLM_CALL);
+                    assertThat(e.recovered()).isFalse();
+                });
+        verify(llm, never()).call(eq(PATH + JsonRetryingCaller.JSON_RETRY_SUFFIX), anyString(), anyString());
     }
 
     @Test
@@ -124,6 +163,14 @@ class FileReviewerTest {
         FileReviewResult r = reviewer.review(DIFF, SUMMARY);
 
         assertThat(r.findings()).extracting(Finding::line).containsExactly(10, 12, 13);
+        assertThat(r.errors()).hasSize(2).allSatisfy(e -> {
+            assertThat(e.stage()).isEqualTo(ReviewStage.FINDING_VALIDATION);
+            assertThat(e.file()).isEqualTo(PATH);
+            assertThat(e.message()).contains("行号不在改动范围");
+        });
+        assertThat(r.errors()).extracting(ReviewError::message)
+                .anySatisfy(m -> assertThat(m).contains("line=14"))
+                .anySatisfy(m -> assertThat(m).contains("line=99"));
     }
 
     @Test

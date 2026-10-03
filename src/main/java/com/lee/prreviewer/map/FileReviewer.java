@@ -1,9 +1,5 @@
 package com.lee.prreviewer.map;
 
-import com.lee.prreviewer.llm.CallMetrics;
-import com.lee.prreviewer.llm.LlmCallException;
-import com.lee.prreviewer.llm.LlmClient;
-import com.lee.prreviewer.llm.LlmResponse;
 import com.lee.prreviewer.map.LlmOutputParser.ParsedFinding;
 import com.lee.prreviewer.model.DiffLine;
 import com.lee.prreviewer.model.FileDiff;
@@ -11,6 +7,8 @@ import com.lee.prreviewer.model.Finding;
 import com.lee.prreviewer.model.Hunk;
 import com.lee.prreviewer.model.LineType;
 import com.lee.prreviewer.model.PrSummary;
+import com.lee.prreviewer.model.ReviewError;
+import com.lee.prreviewer.model.ReviewStage;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -21,91 +19,58 @@ import org.springframework.stereotype.Component;
 
 /**
  * Map：单个文件一次 LLM 调用，同时按 STYLE / SECURITY / NAMING 三套规则审查。
- * <p>
- * 重试分两层：
- * <ul>
- *   <li>API 错误 / 超时：LlmClient 内部指数退避重试</li>
- *   <li>输出不是合法 JSON 或结构不符：这里带上错误信息再调用 1 次</li>
- * </ul>
- * 仍失败时返回 failed 结果，不抛异常，不影响其他文件。
+ * 重试由 {@link JsonRetryingCaller} 负责；仍失败时返回 failed 结果，不抛异常，不影响其他文件。
  */
 @Component
 public class FileReviewer {
 
     private static final Logger log = LoggerFactory.getLogger(FileReviewer.class);
-    static final String JSON_RETRY_SUFFIX = " [json-retry]";
 
-    private final LlmClient llm;
+    private final JsonRetryingCaller caller;
     private final PromptBuilder prompts;
-    private final LlmOutputParser parser;
 
-    public FileReviewer(LlmClient llm, PromptBuilder prompts, LlmOutputParser parser) {
-        this.llm = llm;
+    public FileReviewer(JsonRetryingCaller caller, PromptBuilder prompts) {
+        this.caller = caller;
         this.prompts = prompts;
-        this.parser = parser;
     }
 
     public FileReviewResult review(FileDiff file, PrSummary summary) {
-        String system = prompts.systemPrompt();
-        String user = prompts.fileUserPrompt(summary, file);
-        List<CallMetrics> calls = new ArrayList<>();
-
-        LlmResponse first;
-        try {
-            first = llm.call(file.path(), system, user);
-        } catch (LlmCallException e) {
-            calls.add(e.metrics());
-            return failed(file, calls, e.getMessage());
+        JsonRetryingCaller.Result r = caller.call(file.path(), prompts.systemPrompt(),
+                prompts.fileUserPrompt(summary, file));
+        if (r.failed()) {
+            log.error("file_review_failed file={} error={}", file.path(), r.error());
+            return new FileReviewResult(file.path(), List.of(), r.calls(), r.error(), r.errors());
         }
-        calls.add(first.metrics());
-        try {
-            return succeeded(file, parser.parse(first.content()), calls);
-        } catch (InvalidLlmOutputException firstError) {
-            log.warn("llm_output_invalid file={} error={} — 带错误信息重试 1 次", file.path(), firstError.getMessage());
-
-            LlmResponse second;
-            try {
-                second = llm.call(file.path() + JSON_RETRY_SUFFIX, system,
-                        prompts.jsonRetryPrompt(user, first.content(), firstError.getMessage()));
-            } catch (LlmCallException e) {
-                calls.add(e.metrics());
-                return failed(file, calls, "JSON 重试时 LLM 调用失败: " + e.getMessage());
-            }
-            calls.add(second.metrics());
-            try {
-                return succeeded(file, parser.parse(second.content()), calls);
-            } catch (InvalidLlmOutputException secondError) {
-                return failed(file, calls, "LLM 输出两次均无法解析: " + firstError.getMessage()
-                        + " / " + secondError.getMessage());
-            }
-        }
-    }
-
-    private static FileReviewResult succeeded(FileDiff file, List<ParsedFinding> parsed, List<CallMetrics> calls) {
         Set<Integer> reviewable = reviewableLines(file);
         List<Finding> findings = new ArrayList<>();
-        for (ParsedFinding p : parsed) {
+        List<ReviewError> errors = new ArrayList<>(r.errors());
+        String callLabel = r.calls().get(r.calls().size() - 1).label(); // findings 来自最后一次（成功解析的）调用
+        for (ParsedFinding p : r.findings()) {
             if (!reviewable.contains(p.line())) {
-                log.warn("finding_dropped file={} line={} category={} reason=行号不在改动范围 message={}",
-                        file.path(), p.line(), p.category(), p.message());
+                errors.add(droppedFinding(file.path(), callLabel, p, "行号不在改动范围"));
                 continue;
             }
             // file 由代码填入，忽略 LLM 可能输出的 file 字段
             findings.add(new Finding(file.path(), p.line(), p.category(), p.severity(), p.message(), p.suggestion()));
         }
-        return new FileReviewResult(file.path(), findings, calls, null);
+        return new FileReviewResult(file.path(), findings, r.calls(), null, errors);
     }
 
-    private static FileReviewResult failed(FileDiff file, List<CallMetrics> calls, String error) {
-        log.error("file_review_failed file={} error={}", file.path(), error);
-        return new FileReviewResult(file.path(), List.of(), calls, error);
+    /** 被丢弃的 finding：写警告日志，同时返回一条 ReviewError 写进报告。single 模式共用。 */
+    public static ReviewError droppedFinding(String file, String callLabel, ParsedFinding p, String reason) {
+        log.warn("finding_dropped file={} line={} category={} reason={} message={}",
+                file, p.line(), p.category(), reason, p.message());
+        return new ReviewError(ReviewStage.FINDING_VALIDATION, file, callLabel, false,
+                "finding 被丢弃（" + reason + "）: file=" + p.file() + " line=" + p.line() + " category=" + p.category()
+                        + " severity=" + p.severity() + " message=" + p.message());
     }
 
     /**
      * 允许 finding 落在的行：ADDED 行，以及与 ADDED 行相邻的 CONTEXT 行（设计文档 6.5）。
      * "相邻"按 hunk 内顺序计算，跳过中间的 REMOVED 行（它们在新文件中不存在）。
+     * single 模式也用它校验行号。
      */
-    static Set<Integer> reviewableLines(FileDiff file) {
+    public static Set<Integer> reviewableLines(FileDiff file) {
         Set<Integer> lines = new HashSet<>();
         for (Hunk h : file.hunks()) {
             // 只保留在新文件中存在的行（ADDED / CONTEXT），按原顺序

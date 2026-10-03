@@ -1,6 +1,6 @@
 # PR Reviewer 设计文档（实现用）
 
-> v1.2｜2026-10-02｜被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
+> v1.3｜2026-10-02｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
 
 ---
 
@@ -156,18 +156,43 @@ record Finding(
 
 record CallMetrics(String label, int inputTokens, int outputTokens, long latencyMs, boolean success, int attempts) {}
 
+// v1.3：出问题的环节，按流水线顺序
+enum ReviewStage {
+    PREPARE,             // 解析 PR 链接、拉取 GitHub、解析 patch；失败时整个审查无法进行
+    LLM_CALL,            // 某一次 LLM API 调用尝试失败（超时、5xx、429、4xx 如超出上下文）
+    LLM_OUTPUT,          // LLM 输出无法解析为 findings JSON，或结构不符
+    FINDING_VALIDATION,  // finding 被丢弃：file 不是本次审查的文件，或行号不在改动范围
+    INTERNAL             // 未预期的异常（通常是代码 bug）
+}
+
+// v1.3：审查过程中的一个问题，保证任何一步出错都能溯源到环节、文件和具体调用
+record ReviewError(
+    ReviewStage stage,
+    String file,         // 涉及的文件；single 模式整次调用的问题为 "single"；PREPARE 为 null
+    String callLabel,    // 相关 LLM 调用的 label（与 CallMetrics.label、日志一致，含 " [json-retry]"）；非 LLM 环节为 null
+    boolean recovered,   // true = 已通过重试恢复，不影响结果；false = 导致文件失败或 finding 被丢弃
+    String message       // 原始错误信息（异常类型 + 完整 cause 链）；LLM_OUTPUT 附 LLM 输出的开头
+) {}
+
 record ReviewReport(
     ReviewMode mode,
     String prUrl,
     List<Finding> findings,          // 已去重排序
-    List<String> failedFiles,        // 重试后仍失败的文件
+    List<String> failedFiles,        // 重试后仍失败的文件；single 整次调用失败时为全部待审文件
     List<SkippedFile> skippedFiles,
+    List<ReviewError> errors,        // v1.3：全部问题（含已恢复的），按发生顺序；预处理失败时只有这一项有内容
     List<CallMetrics> calls,
     long totalLatencyMs,             // 墙钟时间
     int totalInputTokens,
     int totalOutputTokens
 ) {}
 ```
+
+`errors` 的记录规则：
+- LLM 调用的**每一次失败尝试**都记一条 `LLM_CALL`（含最终重试成功的，`recovered = true`）
+- 每次输出解析失败记一条 `LLM_OUTPUT`；JSON 重试后成功则首次失败 `recovered = true`
+- 每条被丢弃的 finding 记一条 `FINDING_VALIDATION`，message 含 LLM 原始的 file / line / category / message
+- 预处理失败不抛异常，返回只含一条 `PREPARE` 错误的报告（CLI 照常输出报告和 `--out` JSON，退出码 1）
 
 ---
 
@@ -250,6 +275,8 @@ PR 摘要提供全局上下文，仅用于理解，不要审查摘要中提到�
 - 一次调用，输入：同样的系统提示 + 三套规则 + PR 摘要 + **所有文件** `annotatedDiff` 拼接
 - 输出格式同上，但每个 finding 需要 LLM 填 `file`
 - 超出模型上下文时**不要截断**，直接记录失败和报错信息——"装不下"本身就是实验结果
+- 整次调用失败时，`failedFiles` 为全部待审文件，报错信息记入 `errors`
+- 重试策略与 map 相同（API 错误指数退避 + 非法 JSON 重试 1 次）；LLM 填的 `file` 不是本次审查的文件、或行号不在该文件改动范围的 finding 丢弃并记入 `errors`
 
 ### 6.8 FindingAggregator（Reduce，纯代码）
 1. 合并所有 finding
@@ -312,6 +339,7 @@ llm:
   api-key: ${LLM_API_KEY}
   model: ${LLM_MODEL}
   timeout-seconds: 120
+  temperature: 0          # v1.3：固定，保证同一 PR 多次审查结果尽量一致（召回对比需要）
 github:
   api-base: https://api.github.com
   token: ${GITHUB_TOKEN}
@@ -357,6 +385,7 @@ review:
 ### 错误处理原则
 - 单个文件失败不影响整体，报告里列出 `failedFiles` 和 `skippedFiles`
 - 异常保留原始原因，不要吞掉或替换成笼统提示
+- 任何环节出的问题都写进报告的 `errors`（见第 5 节），包括已被重试恢复的，保证可以从报告溯源到环节、文件和具体调用
 
 ### 测试要求
 - `PrUrlParser`：合法 / 非法链接

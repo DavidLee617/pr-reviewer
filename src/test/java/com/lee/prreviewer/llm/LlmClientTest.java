@@ -84,6 +84,10 @@ class LlmClientTest {
 
         assertThat(r.metrics().attempts()).isEqualTo(3);
         assertThat(sleeps).containsExactly(1000L, 2000L);
+        // 被重试恢复的失败也要留下记录，用于溯源
+        assertThat(r.attemptErrors()).hasSize(2)
+                .allSatisfy(msg -> assertThat(msg).contains("TransientAiException", "HTTP 503"));
+        assertThat(r.attemptErrors().get(0)).startsWith("第 1 次尝试失败");
     }
 
     @Test
@@ -99,6 +103,7 @@ class LlmClientTest {
                     CallMetrics m = ((LlmCallException) e).metrics();
                     assertThat(m.success()).isFalse();
                     assertThat(m.attempts()).isEqualTo(3);
+                    assertThat(((LlmCallException) e).attemptErrors()).hasSize(3);
                 });
     }
 

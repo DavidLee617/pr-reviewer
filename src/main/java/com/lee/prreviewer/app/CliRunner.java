@@ -13,6 +13,7 @@ import com.lee.prreviewer.model.LineType;
 import com.lee.prreviewer.model.PreparedPr;
 import com.lee.prreviewer.model.ReviewMode;
 import com.lee.prreviewer.model.ReviewReport;
+import com.lee.prreviewer.model.ReviewStage;
 import com.lee.prreviewer.model.SkippedFile;
 import com.lee.prreviewer.pipeline.ReviewPipeline;
 import com.lee.prreviewer.pipeline.ReviewProgressListener;
@@ -39,7 +40,7 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
               java -jar pr-reviewer.jar ping                                   测试 LLM 连通性（打印 token 和耗时）
               java -jar pr-reviewer.jar files --pr <PR链接> [--diff]           预处理：文件列表、跳过列表、PR 摘要
               java -jar pr-reviewer.jar review-file --pr <PR链接> --file <路径>   审查单个文件
-              java -jar pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   完整审查（默认 mapreduce；single 待 M5）
+              java -jar pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   完整审查（默认 mapreduce）
               java -jar pr-reviewer.jar eval --report report.json --truth ground_truth.json             (M6)
               java -jar pr-reviewer.jar mcp                                    以 MCP stdio server 启动 (M7)
             """; // ≈ C# 11 的原始字符串字面量 """..."""
@@ -161,8 +162,9 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
     }
 
     /**
-     * M4：完整审查。stdout 依次输出：实时进度 → Markdown 报告 → 汇总；--out 时另写完整 JSON。
-     * 有文件审查失败时退出码为 1（报告仍完整输出）。
+     * 完整审查。stdout 依次输出：实时进度 → Markdown 报告 → 汇总；--out 时另写完整 JSON。
+     * 预处理失败（链接非法、GitHub 报错）也会输出报告和 JSON，错误在"问题追踪"里。
+     * 预处理失败或有文件审查失败时退出码为 1（报告仍完整输出）。
      */
     private int review(String[] args) {
         String prUrl = option(args, "--pr");
@@ -180,14 +182,8 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
         }
         String out = option(args, "--out");
 
-        ConsoleProgress progress = new ConsoleProgress();
-        ReviewReport report;
-        try {
-            report = pipeline.review(prUrl, mode, progress);
-        } catch (IllegalArgumentException | GitHubApiException | UnsupportedOperationException e) {
-            System.out.println("✗ " + e.getMessage());
-            return 1;
-        }
+        ConsoleProgress progress = new ConsoleProgress(mode);
+        ReviewReport report = pipeline.review(prUrl, mode, progress);
 
         System.out.println();
         System.out.print(MarkdownReport.render(report));
@@ -198,6 +194,7 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
                 progress.total, report.failedFiles().size(), report.skippedFiles().size());
         System.out.printf("LLM       %d 次调用 · in=%d out=%d%n",
                 report.calls().size(), report.totalInputTokens(), report.totalOutputTokens());
+        System.out.printf("问题追踪  %s%n", MarkdownReport.errorCounts(report.errors()));
         System.out.printf("耗时      %.1fs（墙钟）%n", report.totalLatencyMs() / 1000.0);
 
         if (out != null) {
@@ -209,18 +206,32 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
                 return 1;
             }
         }
-        return report.failedFiles().isEmpty() ? 0 : 1;
+        boolean prepareFailed = report.errors().stream().anyMatch(e -> e.stage() == ReviewStage.PREPARE);
+        return prepareFailed || !report.failedFiles().isEmpty() ? 1 : 0;
     }
 
-    /** 打印 [3/11] service/OrderService.java  in=3242 out=909  4.5s  ✓ 形式的进度行。 */
+    /**
+     * 打印 [3/11] service/OrderService.java  in=3242 out=909  4.5s  ✓ 形式的进度行。
+     * single 模式只有一行：[1/1] single（11 个文件）…
+     */
     private static final class ConsoleProgress implements ReviewProgressListener {
+        private final ReviewMode mode;
         private int total;
         private String commonPrefix = "";
         private int pathWidth;
 
+        ConsoleProgress(ReviewMode mode) {
+            this.mode = mode;
+        }
+
         @Override
         public void onPrepared(PreparedPr pr) {
             total = pr.files().size();
+            if (mode == ReviewMode.SINGLE) {
+                System.out.printf("审查 %d 个文件（跳过 %d），single 模式：一次调用，请稍候…%n",
+                        total, pr.skippedFiles().size());
+                return;
+            }
             List<String> paths = pr.files().stream().map(FileDiff::path).toList();
             commonPrefix = commonDirPrefix(paths);
             pathWidth = paths.stream().mapToInt(p -> p.length() - commonPrefix.length()).max().orElse(0);
@@ -230,6 +241,9 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
 
         @Override
         public void onFileReviewed(int done, int total, FileReviewResult r) {
+            String name = mode == ReviewMode.SINGLE
+                    ? r.file() + "（" + this.total + " 个文件）"
+                    : r.file().substring(commonPrefix.length());
             // 一个文件可能有多次调用（JSON 重试），合计显示
             int in = r.calls().stream().mapToInt(CallMetrics::inputTokens).sum();
             int outTokens = r.calls().stream().mapToInt(CallMetrics::outputTokens).sum();
@@ -237,7 +251,7 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
             String width = String.valueOf(String.valueOf(total).length());
             String status = r.failed() ? "✗ " + r.error() : "✓ " + r.findings().size() + " findings";
             System.out.printf("[%" + width + "d/%d] %-" + Math.max(pathWidth, 1) + "s  in=%d out=%d  %.1fs  %s%n",
-                    done, total, r.file().substring(commonPrefix.length()), in, outTokens, ms / 1000.0, status);
+                    done, total, name, in, outTokens, ms / 1000.0, status);
         }
 
         /** 所有路径共同的目录前缀（以 / 结尾），用于缩短进度行。 */

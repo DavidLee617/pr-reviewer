@@ -19,6 +19,7 @@ spring:
       chat:
         options:
           model: ${llm.model}
+          temperature: ${llm.temperature}
     retry:
       # 关闭 Spring AI 自带重试（默认 10 次），由 LlmClient 自己重试，才能准确记录 attempts
       max-attempts: 1
@@ -36,6 +37,7 @@ llm:
   api-key: ${LLM_API_KEY:}
   model: ${LLM_MODEL:}
   timeout-seconds: 120
+  temperature: 0                 # 固定，保证同一 PR 多次审查结果尽量一致（召回对比需要）
 
 github:
   api-base: https://api.github.com

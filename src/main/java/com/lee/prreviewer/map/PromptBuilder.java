@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
@@ -40,6 +41,26 @@ public class PromptBuilder {
     public String fileUserPrompt(PrSummary summary, FileDiff file) {
         return "## PR 摘要（仅供理解上下文）\n" + summary.render()
                 + "\n## 待审查的 diff\n" + file.annotatedDiff();
+    }
+
+    /**
+     * single 模式（baseline）的 user 消息：PR 摘要 + 所有文件的 diff + 要求填 file 字段。
+     * 系统提示与 map 完全相同，只在这里补充多文件的输出要求，保证两种模式只差"一次给多少 diff"。
+     */
+    public String singleUserPrompt(PrSummary summary, List<FileDiff> files) {
+        StringBuilder sb = new StringBuilder("## PR 摘要（仅供理解上下文）\n").append(summary.render())
+                .append("\n## 待审查的 diff（共 ").append(files.size()).append(" 个文件）\n");
+        for (FileDiff f : files) {
+            sb.append(f.annotatedDiff()).append('\n');
+        }
+        sb.append("""
+                ## 本次输出要求
+                本次一次给出了多个文件的 diff，请逐个文件审查。每条 finding 必须额外包含 "file" 字段，\
+                取值为该问题所在 diff 开头 `File:` 后面的完整路径，例如：
+                {"findings": [{"file": "src/main/java/com/example/Foo.java", "line": 43, "category": "SECURITY", \
+                "severity": "HIGH", "message": "问题描述", "suggestion": "修改建议"}]}
+                """);
+        return sb.toString();
     }
 
     /** 输出无法解析时的重试消息：原请求 + 错误信息 + 上次输出的开头。 */
