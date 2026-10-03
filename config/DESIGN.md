@@ -1,6 +1,6 @@
 # PR Reviewer 设计文档（实现用）
 
-> v1.4｜2026-10-02｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles；MCP 的 review_file 返回完整 FileReviewResult｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`（不在本仓库）；实现过程中的决定及原因见仓库根目录的 `SESSION.md`。
+> v1.5｜2026-10-02｜v1.5：新增使用方 pr-agent（DeepSeek Agent 通过 MCP 编排本工程的 tool）；`list_pr_files` 返回加 `prFiles`；`ReviewMode` 加 `AGENT`（只用于 eval 读取 pr-agent 的报告，本工程不能以此模式运行）。本工程仍是 Workflow，第 13 节"不做 Agent 自主决策"不变｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles；MCP 的 review_file 返回完整 FileReviewResult｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`（不在本仓库）；实现过程中的决定及原因见仓库根目录的 `SESSION.md`。
 
 ---
 
@@ -131,7 +131,7 @@ FindingAggregator → ReviewReport（含 metrics）
 ```java
 record ReviewRequest(String owner, String repo, int prNumber) {}
 
-enum ReviewMode { MAPREDUCE, SINGLE }
+enum ReviewMode { MAPREDUCE, SINGLE, AGENT }   // AGENT：pr-agent 生成的报告，只供 eval 读取（v1.5）
 
 record FileDiff(
     String path,              // GitHub 返回的 filename
@@ -338,11 +338,13 @@ Tools（按"需要代码执行的操作"拆，不按审查类别拆）：
 | Tool | 输入 | 输出 | 说明 |
 |---|---|---|---|
 | `review_pr` | prUrl, mode | ReviewReport | 一键完整审查，Workflow 式编排 |
-| `list_pr_files` | prUrl | 过滤后的文件列表、跳过列表、PR 摘要 | 预处理；不含 diff 正文，避免把整个 PR 塞进 Agent 上下文 |
+| `list_pr_files` | prUrl | 过滤后的文件列表、跳过列表、PR 摘要、`prFiles`（PR 全部文件，GitHub 原始顺序；v1.5） | 预处理；不含 diff 正文，避免把整个 PR 塞进 Agent 上下文。`prFiles` 供 pr-agent 生成报告（eval 分段用） |
 | `review_file` | prUrl, filePath | FileReviewResult（findings + calls + error + errors） | 单文件 map；v1.4 起返回整个结果而非只有 List<Finding>，失败原因可溯源 |
 | `aggregate_findings` | List<Finding> | 去重排序后的 List<Finding> | reduce |
 
 后三个 tool 让外部 Agent 也能自己编排 map-reduce。
+
+**使用方 pr-agent**（v1.5，`/Users/lee/Documents/spring/pr-agent`）：作为 MCP 客户端把本 jar 以 `mcp` 方式拉起，只开放后三个 tool 给 DeepSeek Agent 自主编排，生成 `mode=AGENT` 的报告（字段与 `ReviewReport` 一致，另带 `agent` 对象），用本工程的 `eval` 算召回。`eval` 用 Spring Boot 默认的 `ObjectMapper`，忽略未知字段 `agent`（有测试 `AgentReportCompatibilityTest`）。
 
 实现要点（M7）：
 - 依赖 `spring-ai-starter-mcp-server`（stdio），版本由 spring-ai-bom 管理

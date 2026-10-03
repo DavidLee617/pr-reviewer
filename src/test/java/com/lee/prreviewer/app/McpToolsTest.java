@@ -6,8 +6,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.lee.prreviewer.model.Category;
+import com.lee.prreviewer.model.ChangeType;
+import com.lee.prreviewer.model.FileDiff;
+import com.lee.prreviewer.model.PrSummary;
+import com.lee.prreviewer.model.PreparedPr;
+import com.lee.prreviewer.model.ReviewRequest;
+import com.lee.prreviewer.model.SkippedFile;
 import com.lee.prreviewer.model.Finding;
 import com.lee.prreviewer.model.ReviewMode;
 import com.lee.prreviewer.model.Severity;
@@ -31,6 +38,8 @@ class McpToolsTest {
         assertThat(McpTools.parseMode(" ")).isEqualTo(ReviewMode.MAPREDUCE);
         assertThat(McpTools.parseMode("Single")).isEqualTo(ReviewMode.SINGLE);
         assertThatThrownBy(() -> McpTools.parseMode("fast")).hasMessageContaining("mapreduce 或 single");
+        // AGENT 只用于 eval 读取 pr-agent 的报告，不能作为 review_pr 的模式
+        assertThatThrownBy(() -> McpTools.parseMode("agent")).hasMessageContaining("mapreduce 或 single");
     }
 
     @Test
@@ -47,6 +56,22 @@ class McpToolsTest {
         Finding medium = new Finding("A.java", 3, Category.STYLE, Severity.MEDIUM, "medium", "");
 
         assertThat(tools.aggregateFindings(List.of(low, medium, high))).containsExactly(high, medium);
+    }
+
+    @Test
+    void listPrFilesReturnsAllPrFilesInGitHubOrder() {
+        FileDiff diff = new FileDiff("src/A.java", ChangeType.MODIFIED, List.of(), "");
+        PreparedPr pr = new PreparedPr(new ReviewRequest("o", "r", 1), URL, "sha1",
+                List.of("src/A.java", "application.yml"), List.of(diff),
+                List.of(new SkippedFile("application.yml", "不在审查范围")),
+                new PrSummary("t", List.of(), List.of()));
+        when(pipeline.prepare(URL)).thenReturn(pr);
+
+        McpTools.PrFiles result = tools.listPrFiles(URL);
+
+        // prFiles 含被跳过的文件，供 pr-agent 生成报告（eval 按它分段）
+        assertThat(result.prFiles()).containsExactly("src/A.java", "application.yml");
+        assertThat(result.files()).extracting(McpTools.PrFiles.File::path).containsExactly("src/A.java");
     }
 
     @Test

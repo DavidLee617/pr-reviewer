@@ -21,7 +21,7 @@
 
 | 顺序 | 文件 | 看什么 |
 |---|---|---|
-| 1 | `config/DESIGN.md`（v1.4） | 需求、数据模型（第 5 节）、各模块设计、评估口径（第 9 节）、里程碑（第 12 节）、明确不做的事（第 13 节） |
+| 1 | `config/DESIGN.md`（v1.5） | 需求、数据模型（第 5 节）、各模块设计、评估口径（第 9 节）、里程碑（第 12 节）、明确不做的事（第 13 节） |
 | 2 | `README.md` | 环境变量、所有命令的用法、MCP 客户端配置、C# 对照速查表 |
 | 3 | `src/main/resources/application.yml` | 默认配置：并发 4、重试 2、摘要上限 1500 token、temperature 0、文件过滤规则、MCP server 默认关闭 |
 | 4 | `src/main/resources/prompts/system.md` | 系统提示（角色、只审新增行、行号规则、严重程度定义、JSON 输出格式） |
@@ -83,6 +83,9 @@ PR 链接 → 拉 PR（GitHub REST）→ 过滤 / 解析 patch / 标新文件行
 | `26db3c9` | M7 |
 | `3d84857` | 修正 FINDING_VALIDATION 记录里误导性的空 `file=` |
 | `26317f4` | DESIGN 与实现对齐 |
+| `c89aa78` | 新增交接文档 SESSION.md；旧开发记录改名为 SESSION-history.md |
+| `d7294a5` | 日志同时写文件，加审查进度日志，MCP 模式下可实时查看 token 消耗 |
+| （d7294a5 之后） | 为 pr-agent 做的兼容改动：`list_pr_files` 加 `prFiles`、`ReviewMode` 加 `AGENT`、DESIGN v1.5 |
 
   `main` 只有初始提交 `2995910`（含 M1～M3）。远程 `origin` 已配置，**分支未推送、未合并**。
 
@@ -186,6 +189,7 @@ src/main/resources/
 | 标准答案格式扩展（`locations` 多位置、`categories` 多类别、`severity`、`crossFile`） | 跨文件雷涉及两个位置；可分别统计单文件 / 跨文件召回 |
 | MCP `review_file` 返回完整 `FileReviewResult`（设计原为 `List<Finding>`） | 带 calls / error / errors，失败原因可溯源 |
 | MCP `list_pr_files` 不返回 diff 正文 | 避免把整个 PR 塞进 Agent 上下文 |
+| 新增 pr-agent 作为 MCP 使用方；`list_pr_files` 加 `prFiles`，`ReviewMode` 加 `AGENT`（`review` 命令和 `review_pr` 拒绝 AGENT） | pr-agent 要生成能被 `eval` 读取的报告：`prFiles` 用于分段，`AGENT` 用于反序列化 mode。只加字段，不改现有行为；流水线只区分 SINGLE / 其他，若放行 AGENT 会实际跑 mapreduce 却标成 AGENT，所以两个入口显式拒绝 |
 | 日志同时写文件 `~/.pr-reviewer/pr-reviewer.log`，流水线加 `review_start` / `file_reviewed` / `review_done` 进度日志 | MCP 模式下 jar 由客户端后台拉起，stderr 和 CLI 进度都看不到（Claude Code 的 MCP 日志只记录启动阶段的 stderr）；DESIGN 7.2 允许日志写文件 |
 
 ---

@@ -56,7 +56,7 @@ public class McpTools {
         List<PrFiles.File> files = pr.files().stream()
                 .map(f -> new PrFiles.File(f.path(), f.changeType(), f.hunks().size(), addedLines(f)))
                 .toList();
-        return new PrFiles(pr.prUrl(), pr.headSha(), files, pr.skippedFiles(), pr.summary().render());
+        return new PrFiles(pr.prUrl(), pr.headSha(), files, pr.skippedFiles(), pr.summary().render(), pr.prFiles());
     }
 
     @Tool(name = "review_file", description = """
@@ -76,9 +76,13 @@ public class McpTools {
         return aggregator.aggregate(findings);
     }
 
-    /** list_pr_files 的返回值：不含 diff 正文，避免把整个 PR 塞进 Agent 的上下文。 */
+    /**
+     * list_pr_files 的返回值：不含 diff 正文，避免把整个 PR 塞进 Agent 的上下文。
+     *
+     * @param prFiles PR 全部文件（含被跳过的），GitHub 返回的顺序；pr-agent 生成报告时填入 ReviewReport.prFiles（eval 分段用）
+     */
     public record PrFiles(String prUrl, String headSha, List<File> files, List<SkippedFile> skippedFiles,
-                          String summary) {
+                          String summary, List<String> prFiles) {
         public record File(String path, ChangeType changeType, int hunks, long addedLines) {}
     }
 
@@ -86,11 +90,16 @@ public class McpTools {
         if (mode == null || mode.isBlank()) {
             return ReviewMode.MAPREDUCE;
         }
+        ReviewMode parsed;
         try {
-            return ReviewMode.valueOf(mode.strip().toUpperCase(Locale.ROOT));
+            parsed = ReviewMode.valueOf(mode.strip().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("mode 只能是 mapreduce 或 single，收到: " + mode, e);
         }
+        if (!parsed.runnableByPipeline()) {
+            throw new IllegalArgumentException("mode 只能是 mapreduce 或 single，收到: " + mode);
+        }
+        return parsed;
     }
 
     private static long addedLines(FileDiff f) {

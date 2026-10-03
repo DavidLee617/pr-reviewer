@@ -183,6 +183,9 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
         try {
             mode = ReviewMode.valueOf(modeArg.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
+            mode = null;
+        }
+        if (mode == null || !mode.runnableByPipeline()) { // AGENT 报告由 pr-agent 生成，这里不能运行
             System.out.println("--mode 只能是 mapreduce 或 single，收到: " + modeArg);
             return 2;
         }
