@@ -77,8 +77,8 @@ public class ReviewPipeline {
         } catch (RuntimeException e) {
             log.error("review_prepare_failed prUrl={} error={}", prUrl, e.toString());
             ReviewError error = new ReviewError(ReviewStage.PREPARE, null, null, false, ReviewError.describe(e));
-            return new ReviewReport(mode, prUrl, List.of(), List.of(), List.of(), List.of(error), List.of(),
-                    (System.nanoTime() - start) / 1_000_000, 0, 0);
+            return new ReviewReport(mode, prUrl, null, List.of(), List.of(), List.of(), List.of(), List.of(error),
+                    List.of(), (System.nanoTime() - start) / 1_000_000, 0, 0);
         }
         listener.onPrepared(pr);
 
@@ -100,8 +100,8 @@ public class ReviewPipeline {
         List<ReviewError> errors = results.stream().flatMap(r -> r.errors().stream()).toList();
         long wallMs = (System.nanoTime() - start) / 1_000_000;
 
-        return new ReviewReport(mode, prUrl, aggregator.aggregate(findings), failedFiles, pr.skippedFiles(), errors,
-                calls, wallMs,
+        return new ReviewReport(mode, prUrl, pr.headSha(), pr.prFiles(), aggregator.aggregate(findings), failedFiles,
+                pr.skippedFiles(), errors, calls, wallMs,
                 calls.stream().mapToInt(CallMetrics::inputTokens).sum(),
                 calls.stream().mapToInt(CallMetrics::outputTokens).sum());
     }
@@ -127,7 +127,8 @@ public class ReviewPipeline {
             }
         }
         PrSummary summary = summaryBuilder.build(info.title(), files);
-        return new PreparedPr(request, prUrl, info.headSha(), files, skipped, summary);
+        List<String> prFiles = rawFiles.stream().map(PrFile::filename).toList();
+        return new PreparedPr(request, prUrl, info.headSha(), prFiles, files, skipped, summary);
     }
 
     /**

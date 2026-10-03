@@ -9,7 +9,13 @@
       "Bash(mvn -q test-compile)",
       "Bash(awk -F'[ ,]+' '{t+=$3; f+=$5+$7} END {print \"total=\"t, \"failures+errors=\"f}')",
       "Bash(git add *)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(git commit *)",
+      "Bash(awk '/^File: /{cur=\\($0 ~ /OrderController.java$/\\)} cur' pr1-diff.txt)",
+      "Bash(sed -i '' 's|系统提示 + 三套规则 + PR 摘要|系统提示 + 五套规则 + PR 摘要|' src/main/java/com/lee/prreviewer/map/PromptBuilder.java)",
+      "Bash(sed -i '' 's|同时按 STYLE / SECURITY / NAMING 三套规则审查|同时按 SECURITY / LOGIC / PERF / STYLE / NAMING 五套规则审查|' src/main/java/com/lee/prreviewer/map/FileReviewer.java)",
+      "Bash(java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth ground_truth.json)",
+      "Bash(grep -n \"v1.3｜\\\\|enum Category\\\\|ReviewMode mode,\\\\|String prUrl,$\\\\|三套规则\\\\|STYLE / SECURITY / NAMING\\\\|rules/style.md\\\\|^### 埋点清单\\\\|^## 9\\\\|^### 匹配规则\\\\|^### 输出\\\\|^## 10\\\\|naming.md\\\\|eval --report\\\\|eval\\\\` 打印\" config/DESIGN.md)"
     ],
     "additionalDirectories": [
       "/Users/lee"

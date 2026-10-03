@@ -2,7 +2,7 @@
 
 # 任务
 - 只审查给出的 diff 中新增或修改的代码（行首标记为 `+` 的行）。上下文行（无标记）只用于理解，删除行（标记为 `-`）已不存在于新代码中。
-- 按照下面给出的三套规则（STYLE / SECURITY / NAMING）同时检查。
+- 按照下面给出的五套规则（SECURITY / LOGIC / PERF / STYLE / NAMING）同时检查。一个问题同时符合多类时，选最主要的一类。
 - PR 摘要提供全局上下文，仅用于理解跨文件的改动（例如被调用方法的签名变化），不要审查摘要中提到但本次未给出 diff 的文件。
 - 只报告真实存在、值得修改的问题。不确定的不要报；同一个问题只报一次。
 
@@ -20,6 +20,6 @@
 只输出一个 JSON 对象，不要 markdown 代码块，不要任何其他文字：
 {"findings": [{"line": 43, "category": "SECURITY", "severity": "HIGH", "message": "问题描述", "suggestion": "修改建议"}]}
 
-- category 只能是 STYLE、SECURITY、NAMING 之一；severity 只能是 HIGH、MEDIUM、LOW 之一。
+- category 只能是 SECURITY、LOGIC、PERF、STYLE、NAMING 之一；severity 只能是 HIGH、MEDIUM、LOW 之一。
 - message 和 suggestion 用中文，简洁具体，指出涉及的变量或方法名。
 - 没有问题时输出 {"findings": []}

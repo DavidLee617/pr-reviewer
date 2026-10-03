@@ -1,7 +1,7 @@
 # pr-reviewer 开发记录
 
 > 记录截至 2026-10-02 的全部进展、决定和待办，用于下次接着做。
-> 设计文档：[config/DESIGN.md](config/DESIGN.md)（v1.3）｜使用说明：[README.md](README.md)
+> 设计文档：[config/DESIGN.md](config/DESIGN.md)（v1.4）｜使用说明：[README.md](README.md)
 
 ---
 
@@ -11,15 +11,16 @@
 |---|---|---|
 | M1 | 骨架、配置、数据模型、LlmClient + 计量 | ✅ 已完成，真实调通 DeepSeek |
 | M2 | PR 链接解析、GitHub 拉取、patch 解析、过滤、PR 摘要 | ✅ 已完成，用 PR #1 和 dotnet/eShop#1002 验证 |
-| M3 | 单文件审查、prompt、三套规则、重试 | ✅ 已完成，PR #1 的 11 个文件全部一次输出合法 JSON |
+| M3 | 单文件审查、prompt、规则、重试 | ✅ 已完成，PR #1 的 11 个文件全部一次输出合法 JSON |
 | M4 | 并发 map + 去重汇总 + CLI `review` + 报告 | ✅ 已完成，PR #1 跑通（见第 6 节） |
 | M5 | single 模式（baseline）+ 报告错误溯源 | ✅ 已完成，PR #1 跑通（见第 6 节） |
-| **M6** | **召回评估 + CLI `eval`** | ⏭ **下一步** |
-| M7 | MCP server 四个 tool | 未开始 |
+| M6 | 召回评估 + CLI `eval`；类别加 LOGIC / PERF | ✅ 已完成，PR #1 两种模式都算出召回（见第 6 节） |
+| **M7** | **MCP server 四个 tool** | ⏭ **下一步** |
 | M8 | 写回 PR 评论（可选） | 未开始 |
 
-- 单元测试：86 个，全部通过（`mvn package`）
-- 测试用 PR：https://github.com/DavidLee617/bookmarket/pull/1 （分支 `feature/order-payment-coupon-search`，12 个文件，11 个 .java）
+- 单元测试：95 个，全部通过（`mvn package`）
+- 测试用 PR：https://github.com/DavidLee617/bookmarket/pull/1 （分支 `feature/order-payment-coupon-search`，head `7fd23c0`，12 个文件，11 个 .java）
+- PR #1 的标准答案：`ground_truth.json`（19 个埋点，由用户的人工埋雷文档 `bookmarket-pr1-seeded-bugs.md` 转写）
 
 ---
 
@@ -41,6 +42,11 @@
 | temperature 固定为 0（`llm.temperature`） | 未设置时同一 PR 两次结果条数不同，召回对比没有意义 |
 | single 整次失败时 `failedFiles` = 全部待审文件 | 一次调用失败等于所有文件都没审到 |
 | single 的系统提示与 map 完全相同，"填 file"的要求写在 user 消息末尾 | 两种模式只差"一次给多少 diff"，对比才公平；也能命中前缀缓存 |
+| 类别加 LOGIC、PERF（DESIGN v1.4） | 埋雷文档的类型是 security / logic / perf / style，19 条里 11 条 logic、1 条 perf；只有三类时逻辑 bug 全归到 STYLE，类别一致率没有意义。从 style.md / security.md 中把逻辑相关的条目移到 logic.md |
+| 命中：±3 行 + **一对一匹配**，类别优先于行距 | ±3 按埋雷文档口径。PR #1 实测：只看位置时一条 finding 会"命中"多个相邻埋点（"库存 `<=`"顺带命中拆箱 NPE），召回被高估（mapreduce 18→17、single 17→14）；行距优先时"返回 User 实体"配到了相邻行的 System.out。"问题本质是否一致"代码判断不了，eval 列出配对原文供人工复核 |
+| #3（application.yml 硬编码 token）保留在答案里 | 文件被 include 规则跳过，任何模式都命中不了。召回分"全部"和"审查范围内"两个口径，如实反映过滤规则的盲区 |
+| 标准答案格式扩展：`locations` 多位置、`categories` 多类别、`severity`、`crossFile` | 跨文件雷涉及两个位置；文档有严重程度和跨文件标记，可分别统计单文件 / 跨文件召回 |
+| 报告加 `headSha`、`prFiles` | 分段需要 PR 原始文件顺序；headSha 用来核对答案的行号是否针对同一提交 |
 | 摘要：v1 保留 | 讨论过"为什么不每次把完整 diff 给 LLM"：成本按"文件数 × PR 大小"增长、单次输入又与 PR 规模挂钩、会重复报问题。摘要是固定小篇幅的跨文件上下文 |
 
 ### 设计之外额外加的东西
@@ -80,15 +86,16 @@
 在 `pr-reviewer` 目录下执行：
 
 ```bash
-mvn package                                                         # 编译 + 86 个单元测试
+mvn package                                                         # 编译 + 95 个单元测试
 java -jar target/pr-reviewer.jar ping                               # 测 LLM 连通
 java -jar target/pr-reviewer.jar files --pr https://github.com/DavidLee617/bookmarket/pull/1 [--diff]
 java -jar target/pr-reviewer.jar review-file --pr https://github.com/DavidLee617/bookmarket/pull/1 --file OrderService.java
-java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --out report.json
+java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --out report-mapreduce.json
 java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --mode single --out report-single.json
+java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth ground_truth.json
 ```
 
-继续开发时，对 Claude 说"继续做 M6"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
+继续开发时，对 Claude 说"继续做 M7"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
 
 ---
 
@@ -97,8 +104,10 @@ java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/book
 ```
 src/main/java/com/lee/prreviewer/
 ├── PrReviewerApplication.java   入口；非 mcp 命令跑完即退出
-├── app/CliRunner.java           命令：ping / files / review-file / review（eval、mcp 待实现）
+├── app/CliRunner.java           命令：ping / files / review-file / review / eval（mcp 待实现）
 ├── app/MarkdownReport.java      ReviewReport → Markdown（按 severity 分节）
+├── app/EvalReport.java          EvalResult → Markdown
+├── eval/                        RecallEvaluator（±3 行 + 一对一匹配）、GroundTruth、EvalResult
 ├── config/                      LlmProperties / GitHubProperties / ReviewProperties（@Validated，缺配置启动失败）
 ├── github/                      PrUrlParser、GitHubPrClient（分页拉全、错误带状态码和 message）、PrFile、PrInfo、GitHubApiException
 ├── preprocess/                  PatchParser（带行号的 annotatedDiff）、FileFilter、PrSummaryBuilder（Java public 签名启发式 + 截断）
@@ -109,7 +118,7 @@ src/main/java/com/lee/prreviewer/
 └── model/                       设计第 5 节的全部 record / enum（含 v1.3 的 ReviewError、ReviewStage），外加 PreparedPr
 src/main/resources/
 ├── prompts/system.md            系统提示（Java 审查员、行号规则、严重程度、JSON 格式）
-└── rules/style.md, security.md, naming.md
+└── rules/security.md, logic.md, perf.md, style.md, naming.md
 ```
 
 代码注释里的「C# 对照」说明 Java/Spring 概念在 C#/.NET 中的对应写法（record、IOptions、HttpClient、xUnit、Moq 等），README 末尾有汇总表。
@@ -119,11 +128,13 @@ src/main/resources/
 - **finding 行号范围**：只接受新增行，以及与新增行相邻的上下文行（跳过中间的删除行判断相邻）；其余丢弃，写 `finding_dropped` 警告日志并记一条 `FINDING_VALIDATION` 错误
 - **错误溯源**：`LlmClient` 把每次失败尝试的错误放进 `LlmResponse.attemptErrors` / `LlmCallException.attemptErrors`；`JsonRetryingCaller` 转成 `ReviewError`（按发生顺序，首次解析失败的"是否已恢复"等重试结果出来后补上）；`ReviewError.describe()` 输出异常类型 + 完整 cause 链
 - **single 模式**：LLM 填的 `file` 先完全匹配，否则接受唯一匹配的路径后缀并补全；进度只有一行 `[1/1] single（N 个文件）`
-- **prompt 结构**：system = 系统提示 + 三套规则；user = PR 摘要 + 本文件 diff。同一 PR 的所有调用前缀相同，DeepSeek 会自动命中前缀缓存
+- **prompt 结构**：system = 系统提示 + 五套规则；user = PR 摘要 + 本文件 diff。同一 PR 的所有调用前缀相同，DeepSeek 会自动命中前缀缓存
 - **摘要截断**：按约 3 字符/token 估算，超限先删签名再删文件，列表末尾写"已截断"
 - **构造 Prompt 时直接用 SystemMessage / UserMessage**：避免 Java 代码里的 `{}` 被 Spring AI 当成模板占位符
 - **map 并发**：每次 review 新建 `review.concurrency` 大小的线程池（try-with-resources 关闭）；`FileReviewer` 之外的意外异常在任务内兜住，记为该文件失败；结果按输入顺序返回，进度回调串行、按完成顺序编号
 - **totalLatencyMs**：整个 review 的墙钟时间，包括拉取 GitHub 和预处理
+- **eval 匹配**：候选 = 同文件且 ±3 行；所有候选按 类别一致 → 行距 → 埋点顺序 → finding 顺序 排序后贪心配对，一条 finding 只用一次。分段按主位置（`locations[0]`）的文件在 `prFiles` 中的下标三等分。"审查范围内" = 至少一个位置的文件不在 `skippedFiles`
+- **旧报告兼容**：`ReviewReport` 的列表字段缺失时当空列表处理（读 M4/M5 时代的 JSON 不会报错，但没有 `prFiles` 就无法分段，eval 会警告）
 
 ---
 
@@ -164,30 +175,49 @@ src/main/resources/
 - 加上 `errors` 后再跑一遍：mapreduce 24 条、single 22 条，两次都没有任何错误。**同一 PR 两次结果数量不同**（见待办 #6）
 - 不存在的 PR（#9999）：报告和 JSON 照常输出，`errors` 里一条 `PREPARE`，含 HTTP 404 和具体 GitHub 接口地址，退出码 1
 
+### M6 实测（PR #1，五类规则，temperature 0，对照 ground_truth.json）
+
+| 口径 | mapreduce | single |
+|---|---|---|
+| findings / 输入 token | 25 / 29067 | 18 / 6418 |
+| 全部召回 | **17 / 19（89.5%）** | **14 / 19（73.7%）** |
+| 审查范围内 | 17 / 18 | 14 / 18 |
+| 单文件雷 | 15 / 16 | 12 / 16 |
+| 跨文件雷 | 2 / 3 | 2 / 3 |
+| HIGH / MEDIUM / LOW | 6/8 · 9/9 · 2/2 | 6/8 · 8/9 · 0/2 |
+| 类别一致率 | 17 / 17 | 14 / 14 |
+
+- 两种模式都没找到：B03（application.yml，不在审查范围）、B11（跨文件：`int` 改 `Integer` + `@Min` 对 null 放行 → 拆箱 NPE）
+- single 额外漏掉：B15（魔法值）、B16（命名）、B19（pay 用请求体 userId，IDOR）——single 一条 LOW 都没报
+- 分段：PR #1 的 19 个埋点 14 个在后段、中段只有 1 个，**分段对比没有意义**，要等 50+ 文件的大 PR
+- 未匹配埋点的 finding 主要是 `OrderController` 的 cancel / batchCancel 越权、page/size 未校验等，看起来是真问题但不在答案里（仅参考）
+- 加入五类规则后输入 token 增加约 14%（mapreduce 25492 → 29067）
+
 ---
 
 ## 7. 待决定 / 待办
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | 是否增加 `LOGIC` 类别 | 逻辑 bug（库存 `<=`、分页偏移）现在被归到 STYLE。召回不受影响，类别一致率会偏低 |
-| 2 | 是否加"mapreduce 不带摘要"对照组 | 用来量化摘要的价值；属于设计之外的实验，M6 时再定 |
-| 3 | 准备 `ground_truth.json` | 人工维护（设计第 11 节），不能由同一模型生成。实验目标 PR 需 50+ 文件，埋点分布在前 / 中 / 后三段 |
+| 1 | ~~是否增加 `LOGIC` 类别~~ 已加 LOGIC、PERF | 见第 2 节 |
+| 2 | 是否加"mapreduce 不带摘要"对照组 | 用来量化摘要的价值；属于设计之外的实验。PR #1 的跨文件召回两种模式都是 2/3，样本太少，等大 PR 再定 |
+| 3 | 准备大 PR 和它的 `ground_truth.json` | PR #1 的答案已有。正式实验的 PR 需 50+ 文件，埋点分散在 PR 文件列表的前 / 中 / 后三段，答案人工维护（设计第 11 节），格式见 DESIGN 第 9 节 |
 | 4 | 更换泄露过的密钥 | 见第 3 节 |
 | 5 | Mockito 自动挂载警告 | 测试时打印 "Mockito is currently self-attaching"，不影响结果；未来 JDK 版本需在 surefire 里配置 `-javaagent` |
 | 6 | ~~是否固定 temperature~~ 已固定为 0 | 新配置 `llm.temperature`（默认 0）。PR #1 各跑两次：single 23 条完全一致；mapreduce 26 条中 24 条（位置 + 类别）一致，差异都是 LOW/MEDIUM。DeepSeek 在 temperature=0 下也不完全确定，M6 若要更稳可每种模式跑 2–3 次看命中是否一致 |
 
 ---
 
-## 8. M6 要做什么（下一步）
+## 8. M7 要做什么（下一步）
 
-按 DESIGN.md 第 9、12 节：
+按 DESIGN.md 第 7.2、12 节：
 
-1. `eval/RecallEvaluator`：读 `ReviewReport` JSON + `ground_truth.json`（`id / file / lineStart / lineEnd / category / note`）
-2. 命中规则：存在 finding 的 `file` 相同且 `line` ∈ `[lineStart - 2, lineEnd + 2]`；category 不要求一致，单独统计一致率
-3. 输出：总召回、每个埋点的命中情况、**按文件在 PR 文件列表中的位置分前 / 中 / 后三段**的召回、未匹配任何埋点的 finding 数
-   - 分段需要 PR 文件顺序：报告里目前没有，要定是从 GitHub 重新拉，还是在 `ReviewReport` 里加文件列表
-4. CLI `eval --report report.json --truth ground_truth.json`
-5. 单测：±2 行边界
-6. 前置：`ground_truth.json` 需人工准备（待办 #3）
-7. 验收：两种模式都能算出召回和分段召回
+1. 加 Spring AI 的 MCP server starter（stdio 传输）；版本先查 Maven Central，和 Spring AI 1.1.8 的 BOM 对齐
+2. `app/McpServerConfig`：四个 tool，全部调用现有 `ReviewPipeline` / `FindingAggregator`
+   - `review_pr(prUrl, mode)` → `ReviewReport`（`pipeline.review`，listener 传 NONE）
+   - `list_pr_files(prUrl)` → 过滤后的文件列表、跳过列表、PR 摘要（`pipeline.prepare`）
+   - `review_file(prUrl, filePath)` → `List<Finding>`（`pipeline.reviewFile`；失败时把 errors 一起返回）
+   - `aggregate_findings(List<Finding>)` → 去重排序后的 `List<Finding>`
+3. `mcp` 命令常驻（`PrReviewerApplication` 已对 mcp 模式不退出）；CliRunner 在 mcp 模式下不能往 stdout 写任何东西
+4. README 写一份 MCP 客户端配置示例（command + args + 环境变量）
+5. 验收：从 MCP 客户端（Claude Desktop / VSCode Copilot Agent）调用 `review_pr`

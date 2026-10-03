@@ -1,6 +1,6 @@
 # PR Reviewer 设计文档（实现用）
 
-> v1.3｜2026-10-02｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
+> v1.4｜2026-10-02｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
 
 ---
 
@@ -18,7 +18,7 @@
 
 ### 目标
 对一个 GitHub PR 做代码审查，用 **map-reduce** 让每次 LLM 调用的上下文大小与 PR 规模无关：
-- **Map**：每个文件单独一次 LLM 调用，同时按风格 / 安全 / 命名三套规则审查，输出结构化 JSON
+- **Map**：每个文件单独一次 LLM 调用，同时按安全 / 逻辑 / 性能 / 风格 / 命名五套规则审查（v1.4 前为三套），输出结构化 JSON
 - **Reduce**：用纯代码合并、去重、排序，不调用 LLM
 
 另提供一个 **baseline 模式**（整个 PR 一次调用），用于对比实验。
@@ -53,7 +53,7 @@
 
 | 原系统 | 本项目 | 说明 |
 |---|---|---|
-| 三个 skill（风格/安全/命名） | 三个规则文件 `rules/style.md`、`security.md`、`naming.md` | skill 是**说明书**，本质是 prompt 内容，不是 tool。每次 map 调用同时加载三套规则 |
+| 三个 skill（风格/安全/命名） | 规则文件 `rules/style.md`、`security.md`、`naming.md`（v1.4 另加 `logic.md`、`perf.md`） | skill 是**说明书**，本质是 prompt 内容，不是 tool。每次 map 调用同时加载全部规则 |
 | PowerShell 编排 | Java 流水线 `ReviewPipeline` | Workflow 式固定编排 |
 | — | MCP tools | 只把**需要代码执行的操作**暴露为 tool（拉 PR 文件、单文件审查、汇总），不按审查类别拆 |
 
@@ -81,7 +81,7 @@ com.lee.prreviewer
 │   └── PrSummaryBuilder      生成 PR 摘要
 ├── map/
 │   ├── FileReviewer          单文件一次 LLM 调用
-│   └── PromptBuilder         组装 prompt（系统提示 + 三套规则 + PR 摘要 + diff）
+│   └── PromptBuilder         组装 prompt（系统提示 + 五套规则 + PR 摘要 + diff）
 ├── reduce/
 │   └── FindingAggregator     去重、排序（纯代码）
 ├── llm/
@@ -93,7 +93,7 @@ com.lee.prreviewer
 
 resources/
 ├── prompts/system.md
-└── rules/style.md, security.md, naming.md
+└── rules/style.md, security.md, naming.md, logic.md, perf.md
 ```
 
 ### 流程
@@ -142,7 +142,7 @@ record PrSummary(
     String render();  // 渲染成简短文本，目标 < 1500 tokens
 }
 
-enum Category { STYLE, SECURITY, NAMING }
+enum Category { STYLE, SECURITY, NAMING, LOGIC, PERF }   // v1.4 加入 LOGIC、PERF
 enum Severity { HIGH, MEDIUM, LOW }
 
 record Finding(
@@ -177,6 +177,8 @@ record ReviewError(
 record ReviewReport(
     ReviewMode mode,
     String prUrl,
+    String headSha,                  // v1.4：审查的 PR head commit；eval 用来核对和标准答案是否针对同一提交
+    List<String> prFiles,            // v1.4：PR 全部文件（含被跳过的），GitHub 返回的顺序；eval 按它分三段
     List<Finding> findings,          // 已去重排序
     List<String> failedFiles,        // 重试后仍失败的文件；single 整次调用失败时为全部待审文件
     List<SkippedFile> skippedFiles,
@@ -235,7 +237,7 @@ File: src/main/java/com/example/demo/service/BookService.java
 - `render()` 超过上限时截断并注明"已截断"
 
 ### 6.5 FileReviewer（Map）
-- 每个 `FileDiff` 一次调用，输入：系统提示 + 三套规则 + PR 摘要 + 该文件 `annotatedDiff`
+- 每个 `FileDiff` 一次调用，输入：系统提示 + 五套规则 + PR 摘要 + 该文件 `annotatedDiff`
 - **并发**：固定大小线程池，并发数走配置（默认 4）
 - **重试**：
   - API 错误 / 超时：指数退避，最多 2 次重试
@@ -250,7 +252,7 @@ File: src/main/java/com/example/demo/service/BookService.java
 
 ```
 你是一名 Java 代码审查员。只审查给出的 diff 中新增或修改的代码。
-按照下面给出的三套规则（STYLE / SECURITY / NAMING）同时检查。
+按照下面给出的五套规则（SECURITY / LOGIC / PERF / STYLE / NAMING）同时检查。
 PR 摘要提供全局上下文，仅用于理解，不要审查摘要中提到但本次未给出 diff 的文件。
 行号使用 diff 中左侧标注的新文件行号。
 没有问题时返回空数组。只输出 JSON，不要任何其他文字。
@@ -260,6 +262,11 @@ PR 摘要提供全局上下文，仅用于理解，不要审查摘要中提到�
 - `style.md`：可读性、重复代码、过长方法、空 catch、未释放资源等
 - `security.md`：SQL 注入、硬编码密钥、未校验输入、敏感信息写日志、不安全的反序列化等
 - `naming.md`：Java 命名约定（类 PascalCase、方法/变量 camelCase、常量 UPPER_SNAKE_CASE、包名小写）、含义不清的名字、误导性命名
+- `logic.md`（v1.4）：边界条件、包装类型比较与拆箱、状态流转校验、事务与代理自调用、金额精度、并发竞态
+- `perf.md`（v1.4）：N+1、全量加载后内存过滤 / 分页、无上限查询、循环中的昂贵操作
+
+> v1.4 起为五套规则（SECURITY / LOGIC / PERF / STYLE / NAMING）。此前逻辑 bug 只能归到 STYLE，类别一致率没有意义。
+> 规则必须写成通用规则，**不能参照被审查 PR 的内容来写**，否则评估不可信。
 
 输出格式：
 
@@ -272,7 +279,7 @@ PR 摘要提供全局上下文，仅用于理解，不要审查摘要中提到�
 ```
 
 ### 6.7 SingleCallReviewer（baseline）
-- 一次调用，输入：同样的系统提示 + 三套规则 + PR 摘要 + **所有文件** `annotatedDiff` 拼接
+- 一次调用，输入：同样的系统提示 + 五套规则 + PR 摘要 + **所有文件** `annotatedDiff` 拼接
 - 输出格式同上，但每个 finding 需要 LLM 填 `file`
 - 超出模型上下文时**不要截断**，直接记录失败和报错信息——"装不下"本身就是实验结果
 - 整次调用失败时，`failedFiles` 为全部待审文件，报错信息记入 `errors`
@@ -358,25 +365,43 @@ review:
 
 ## 9. 评估
 
-### 埋点清单格式 `ground_truth.json`
+### 埋点清单格式 `ground_truth.json`（v1.4 扩展）
 
 ```json
-[
-  { "id": "B01", "file": "src/main/java/com/example/demo/service/BookService.java", "lineStart": 40, "lineEnd": 45, "category": "SECURITY", "note": "SQL 拼接" }
-]
+{
+  "prUrl": "https://github.com/DavidLee617/bookmarket/pull/1",
+  "headSha": "7fd23c0c1b04ab126d10459e5c0dc4de6d15624c",
+  "source": "答案来源说明",
+  "bugs": [
+    { "id": "B11", "severity": "HIGH", "crossFile": true, "categories": ["LOGIC"],
+      "locations": [
+        { "file": "src/main/java/com/example/demo/dto/OrderItemRequest.java", "lineStart": 15, "lineEnd": 15 },
+        { "file": "src/main/java/com/example/demo/service/OrderService.java", "lineStart": 56, "lineEnd": 56 }],
+      "note": "int 改 Integer，不传 quantity 时拆箱 NPE" }
+  ]
+}
 ```
 
-`file` 与 GitHub 返回的 `filename` 一致。
+- `file` 与 GitHub 返回的 `filename` 一致；行号是 `headSha` 版本的新文件行号
+- `locations`：跨文件的雷有多个位置，命中任一即算命中；第一个为主位置，决定分段
+- `categories`：可接受的类别（一个问题可能同时属于多类），只用于类别一致率
+- `crossFile`：单看一个文件发现不了的雷，单独统计召回，用来测 map-reduce 的已知弱点
+- `prUrl` / `headSha` 与报告不一致时 eval 给出警告
 
-### 匹配规则
-- 埋点算"命中"：存在至少一条 finding，`file` 相同且 `line` 落在 `[lineStart - 2, lineEnd + 2]`
-- category 不要求一致（单独统计一致率）
+### 匹配规则（v1.4）
+- **候选**：finding 的 `file` 与埋点任一位置相同，且 `line` ∈ `[lineStart - 3, lineEnd + 3]`
+- **一对一**：一条 finding 最多命中一个埋点。候选配对按 类别是否一致 → 行距 → 埋点顺序 → finding 顺序 排序后依次配对，已用过的跳过
+  - 原因：埋点密集时 ±3 窗口重叠，允许一条 finding 命中多个埋点会高估召回（PR #1 实测：一条"库存 `<=`"的 finding 同时"命中"了相邻的拆箱 NPE 埋点）
+  - 类别优先于行距：避免配到相邻行的无关 finding；副作用是类别一致率偏乐观
+- category 不影响是否命中（单独统计一致率）
+- "问题本质是否一致"代码判断不了：eval 列出每个埋点配到的 finding 原文，供人工复核
 
 ### 输出
-- 召回 = 命中数 / 埋点总数
-- 每个埋点的命中情况
-- **按文件在 PR 文件列表中的位置分成前 / 中 / 后三段，分别统计召回**——验证"单次调用时靠后的文件审得更差"
-- 未匹配任何埋点的 finding 数（仅参考，不等于误报）
+- 召回 = 命中数 / 埋点总数；另给"审查范围内"（排除文件被过滤规则跳过的埋点）、单文件雷 / 跨文件雷、按严重程度的召回
+- 每个埋点的命中情况和配到的 finding
+- **按文件在 PR 文件列表（报告的 `prFiles`）中的位置分成前 / 中 / 后三段，分别统计召回**——验证"单次调用时靠后的文件审得更差"
+- 类别一致率（命中的埋点中）
+- 未匹配任何埋点的 finding 及数量（仅参考，不等于误报）
 
 ---
 

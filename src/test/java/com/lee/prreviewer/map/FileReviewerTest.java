@@ -182,7 +182,8 @@ class FileReviewerTest {
     void promptContainsRulesSummaryAndDiff() {
         PromptBuilder prompts = new PromptBuilder();
 
-        assertThat(prompts.systemPrompt()).contains("Java 代码审查员", "规则：STYLE", "规则：SECURITY", "规则：NAMING");
+        assertThat(prompts.systemPrompt()).contains("Java 代码审查员", "规则：STYLE", "规则：SECURITY", "规则：NAMING",
+                "规则：LOGIC", "规则：PERF");
         assertThat(prompts.fileUserPrompt(SUMMARY, DIFF))
                 .contains("PR title: Add payment")
                 .contains("File: " + PATH)

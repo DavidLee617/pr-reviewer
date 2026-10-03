@@ -18,7 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Map：单个文件一次 LLM 调用，同时按 STYLE / SECURITY / NAMING 三套规则审查。
+ * Map：单个文件一次 LLM 调用，同时按 SECURITY / LOGIC / PERF / STYLE / NAMING 五套规则审查。
  * 重试由 {@link JsonRetryingCaller} 负责；仍失败时返回 failed 结果，不抛异常，不影响其他文件。
  */
 @Component

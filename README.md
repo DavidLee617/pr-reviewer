@@ -4,9 +4,9 @@
 
 代码注释里的「C# 对照」说明的是 Java/Spring 概念在 C#/.NET 中的对应写法，方便有 C# 背景的读者理解。
 
-当前进度：**M5**（mapreduce / single 两种模式 + 报告错误溯源）。
+当前进度：**M6**（mapreduce / single 两种模式 + 报告错误溯源 + 召回评估）。
 
-审查规则在 `src/main/resources/rules/`（style / security / naming），系统提示在 `src/main/resources/prompts/system.md`，可直接修改。
+审查规则在 `src/main/resources/rules/`（security / logic / perf / style / naming，对应五个类别），系统提示在 `src/main/resources/prompts/system.md`，可直接修改。
 
 ## 环境
 
@@ -55,6 +55,7 @@ java -jar target/pr-reviewer.jar ping        # 调通一次 LLM，打印 token �
 java -jar target/pr-reviewer.jar files --pr <PR链接> [--diff]   # 文件列表、跳过列表、PR 摘要
 java -jar target/pr-reviewer.jar review-file --pr <PR链接> --file OrderService.java   # 审查单个文件
 java -jar target/pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   # 完整审查
+java -jar target/pr-reviewer.jar eval --report report.json --truth ground_truth.json   # 对照标准答案算召回
 ```
 
 日志写 stderr，结果写 stdout。
@@ -65,6 +66,14 @@ java -jar target/pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single
 - `single`（baseline）：整个 PR 一次调用；超出模型上下文时直接失败、不截断
 
 **问题追踪**：报告的 `errors` 记录过程中所有问题，每条写明环节（`PREPARE` / `LLM_CALL` / `LLM_OUTPUT` / `FINDING_VALIDATION` / `INTERNAL`）、文件、LLM 调用 label（与 stderr 日志一致）、是否已被重试恢复、原始错误信息。预处理失败（链接非法、GitHub 报错）时也照常输出报告和 JSON。预处理失败或有文件审查失败时退出码为 1。
+
+## 召回评估（eval）
+
+`ground_truth.json` 是人工维护的标准答案：PR 里故意埋的 bug 在哪个文件、哪几行、属于什么类别。格式见 `config/DESIGN.md` 第 9 节，仓库根目录下的 `ground_truth.json` 是 bookmarket PR #1 的答案。**答案不能由 AI 生成**，否则评估不可信。
+
+- 命中：finding 与埋点同文件且行号在 ±3 行内；一条 finding 最多命中一个埋点（埋点密集时避免高估）
+- 输出：总召回、审查范围内召回、单文件 / 跨文件召回、按严重程度召回、按 PR 文件顺序分前 / 中 / 后三段的召回、类别一致率、每个埋点配到的 finding 原文（供人工复核"问题本质是否一致"）、未匹配任何埋点的 finding
+- 报告与答案的 PR 或提交不一致时会给出警告
 
 ```
 [ 5/11] controller/OrderController.java   in=2833 out=263  1.9s  ✓ 3 findings

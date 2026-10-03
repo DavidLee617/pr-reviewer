@@ -11,7 +11,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
 /**
- * 组装 prompt：系统提示 + 三套规则 + PR 摘要 + diff。
+ * 组装 prompt：系统提示 + 五套规则 + PR 摘要 + diff。
  * <p>
  * 系统提示和规则放在 system 消息里，PR 摘要放在 user 消息开头：同一个 PR 的所有 map 调用，
  * 前缀（system + 摘要）完全相同，支持前缀缓存的接口（如 DeepSeek、OpenAI）会自动命中缓存，降低成本。
@@ -28,8 +28,10 @@ public class PromptBuilder {
 
     public PromptBuilder() {
         this.systemPrompt = load("prompts/system.md")
-                + "\n# 规则：STYLE\n" + load("rules/style.md")
                 + "\n# 规则：SECURITY\n" + load("rules/security.md")
+                + "\n# 规则：LOGIC\n" + load("rules/logic.md")
+                + "\n# 规则：PERF\n" + load("rules/perf.md")
+                + "\n# 规则：STYLE\n" + load("rules/style.md")
                 + "\n# 规则：NAMING\n" + load("rules/naming.md");
     }
 

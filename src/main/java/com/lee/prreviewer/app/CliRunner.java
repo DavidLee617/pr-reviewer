@@ -1,6 +1,9 @@
 package com.lee.prreviewer.app;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lee.prreviewer.eval.EvalResult;
+import com.lee.prreviewer.eval.GroundTruth;
+import com.lee.prreviewer.eval.RecallEvaluator;
 import com.lee.prreviewer.github.GitHubApiException;
 import com.lee.prreviewer.llm.CallMetrics;
 import com.lee.prreviewer.llm.LlmCallException;
@@ -41,19 +44,21 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
               java -jar pr-reviewer.jar files --pr <PR链接> [--diff]           预处理：文件列表、跳过列表、PR 摘要
               java -jar pr-reviewer.jar review-file --pr <PR链接> --file <路径>   审查单个文件
               java -jar pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   完整审查（默认 mapreduce）
-              java -jar pr-reviewer.jar eval --report report.json --truth ground_truth.json             (M6)
+              java -jar pr-reviewer.jar eval --report report.json --truth ground_truth.json             对照标准答案算召回
               java -jar pr-reviewer.jar mcp                                    以 MCP stdio server 启动 (M7)
             """; // ≈ C# 11 的原始字符串字面量 """..."""
 
     private final LlmClient llmClient;
     private final ReviewPipeline pipeline;
     private final ObjectMapper json;
+    private final RecallEvaluator evaluator;
     private int exitCode = 0;
 
-    public CliRunner(LlmClient llmClient, ReviewPipeline pipeline, ObjectMapper json) {
+    public CliRunner(LlmClient llmClient, ReviewPipeline pipeline, ObjectMapper json, RecallEvaluator evaluator) {
         this.llmClient = llmClient;
         this.pipeline = pipeline;
         this.json = json;
+        this.evaluator = evaluator;
     }
 
     @Override
@@ -69,7 +74,8 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
             case "files" -> files(args);
             case "review-file" -> reviewFile(args);
             case "review" -> review(args);
-            case "eval", "mcp" -> notYet(args[0]);
+            case "eval" -> eval(args);
+            case "mcp" -> notYet(args[0]);
             default -> {
                 System.out.println("未知命令: " + args[0]);
                 System.out.print(USAGE);
@@ -267,6 +273,33 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
             }
             return prefix.substring(0, prefix.lastIndexOf('/') + 1);
         }
+    }
+
+    /** M6：读审查报告 JSON 和标准答案，打印召回（总体、范围内、单/跨文件、按严重程度、分段）和每个埋点的命中情况。 */
+    private int eval(String[] args) {
+        String reportPath = option(args, "--report");
+        String truthPath = option(args, "--truth");
+        if (reportPath == null || truthPath == null) {
+            System.out.println("缺少参数：eval --report report.json --truth ground_truth.json");
+            return 2;
+        }
+        ReviewReport report;
+        GroundTruth truth;
+        try {
+            report = json.readValue(Path.of(reportPath).toFile(), ReviewReport.class);
+        } catch (IOException e) {
+            System.out.println("✗ 读取报告 " + reportPath + " 失败: " + e.getMessage());
+            return 1;
+        }
+        try {
+            truth = json.readValue(Path.of(truthPath).toFile(), GroundTruth.class);
+        } catch (IOException e) {
+            System.out.println("✗ 读取标准答案 " + truthPath + " 失败: " + e.getMessage());
+            return 1;
+        }
+        EvalResult result = evaluator.evaluate(report, truth);
+        System.out.print(EvalReport.render(result, reportPath, truthPath));
+        return 0;
     }
 
     private int notYet(String command) {
