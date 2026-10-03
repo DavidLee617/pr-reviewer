@@ -58,7 +58,7 @@ java -jar target/pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single
 java -jar target/pr-reviewer.jar eval --report report.json --truth ground_truth.json   # 对照标准答案算召回
 ```
 
-日志写 stderr，结果写 stdout。
+日志写 stderr 和 `~/.pr-reviewer/pr-reviewer.log`，结果写 stdout。
 
 `review` 的 stdout 依次是：实时进度 → Markdown 报告 → 汇总；`--out` 另写完整 `ReviewReport` JSON。
 
@@ -137,8 +137,20 @@ Claude Code：
 claude mcp add pr-reviewer -- /opt/homebrew/opt/openjdk@21/bin/java -jar /Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar mcp --spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/
 ```
 
+**实时查看进度和 token 消耗**：MCP 模式下 jar 由客户端在后台拉起，stderr 看不到。日志同时写在 `~/.pr-reviewer/pr-reviewer.log`（CLI 模式也写），另开一个终端：
+
+```bash
+tail -f ~/.pr-reviewer/pr-reviewer.log | grep -E "review_start|file_reviewed|review_done|llm_call|WARN|ERROR"
+```
+
+- `review_start`：开始审查，待审 / 跳过文件数
+- `file_reviewed [3/11] file=... findings=... inputTokens=... outputTokens=... latencyMs=...`：每个文件完成一条（含 JSON 重试的合计）
+- `llm_call label=... inputTokens=... outputTokens=... latencyMs=... attempts=...`：每次 LLM 调用一条（含失败和重试）
+- `review_done ... inputTokens=... outputTokens=... wallMs=...`：整次审查的合计
+- 每行带 `[pid N]`，多个进程（MCP 会话、终端里的 CLI）同时写时可以区分；日志路径可用 `--logging.file.name=...` 修改
+
 说明：
-- 日志全部写 stderr，stdout 只走 MCP 协议；MCP server 只在 `mcp` 命令下启用，其他 CLI 命令不受影响
+- 日志写 stderr 和上面的日志文件，stdout 只走 MCP 协议；MCP server 只在 `mcp` 命令下启用，其他 CLI 命令不受影响
 - `review_pr` 对大 PR 可能要几十秒到几分钟，部分客户端的 tool 超时较短，必要时调大客户端超时
 - 协议版本为 `2024-11-05`（MCP Java SDK 0.18.3 的 stdio 传输），客户端会自动协商
 

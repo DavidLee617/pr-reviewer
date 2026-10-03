@@ -121,7 +121,8 @@ java -jar target/pr-reviewer.jar eval --report report.json --truth ground_truth.
 java -jar target/pr-reviewer.jar mcp          # MCP stdio server（由客户端拉起，不要手动在终端跑）
 ```
 
-- 日志全部写 stderr，stdout 只给结果（mcp 模式下 stdout 是协议通道）。
+- 日志写 stderr，同时写文件 `~/.pr-reviewer/pr-reviewer.log`（`logging.file.name` 可改）；stdout 只给结果（mcp 模式下 stdout 是协议通道）。
+- **查看 token 消耗**：运行中看 CLI 进度行（每文件 in/out）或 `tail -f ~/.pr-reviewer/pr-reviewer.log`（MCP 模式只能看这个，含 `review_start` / `file_reviewed [n/N]` / `llm_call` / `review_done`，每行带 pid）；事后看 `--out` 报告里的 `calls`（每次调用一条）和 `totalInputTokens` / `totalOutputTokens`。程序不记录费用和 DeepSeek 前缀缓存命中数（API 有返回，未采集），费用看 DeepSeek 控制台。
 - `review` 的 stdout：实时进度 → Markdown 报告 → 汇总。预处理失败或有文件审查失败时退出码 1，报告照常输出。
 - `report*.json` 已被 `.gitignore` 排除。
 
@@ -145,7 +146,7 @@ src/main/java/com/lee/prreviewer/
 └── model/                  DESIGN 第 5 节的 record / enum（含 ReviewError、ReviewStage）+ PreparedPr
 src/main/resources/
 ├── application.yml
-├── logback-spring.xml      所有日志 → stderr
+├── logback-spring.xml      日志 → stderr + ~/.pr-reviewer/pr-reviewer.log（prudent 模式，多进程可同时写）
 ├── prompts/system.md
 └── rules/security.md, logic.md, perf.md, style.md, naming.md
 ```
@@ -185,6 +186,7 @@ src/main/resources/
 | 标准答案格式扩展（`locations` 多位置、`categories` 多类别、`severity`、`crossFile`） | 跨文件雷涉及两个位置；可分别统计单文件 / 跨文件召回 |
 | MCP `review_file` 返回完整 `FileReviewResult`（设计原为 `List<Finding>`） | 带 calls / error / errors，失败原因可溯源 |
 | MCP `list_pr_files` 不返回 diff 正文 | 避免把整个 PR 塞进 Agent 上下文 |
+| 日志同时写文件 `~/.pr-reviewer/pr-reviewer.log`，流水线加 `review_start` / `file_reviewed` / `review_done` 进度日志 | MCP 模式下 jar 由客户端后台拉起，stderr 和 CLI 进度都看不到（Claude Code 的 MCP 日志只记录启动阶段的 stderr）；DESIGN 7.2 允许日志写文件 |
 
 ---
 

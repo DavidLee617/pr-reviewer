@@ -46,6 +46,11 @@ spring:
         transcription: none
       moderation: none
 
+logging:
+  file:
+    # 日志除 stderr 外还写这个文件（见 logback-spring.xml）。MCP 模式下看不到 stderr，用 tail -f 实时查看
+    name: ${user.home}/.pr-reviewer/pr-reviewer.log
+
 llm:
   base-url: ${LLM_BASE_URL:}
   api-key: ${LLM_API_KEY:}

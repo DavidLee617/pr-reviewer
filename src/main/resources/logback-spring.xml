@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  所有日志写 stderr：
-  - CLI 模式下 stdout 只留给进度和汇总输出
-  - MCP stdio 模式下 stdout 是协议通道，任何日志写到 stdout 都会破坏协议
-  C# 对照：≈ 在 ConfigureLogging 里配置 AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace)
+  日志同时写两处：
+  1. stderr：CLI 模式下 stdout 只留给进度和汇总输出；MCP stdio 模式下 stdout 是协议通道，任何日志写到 stdout 都会破坏协议
+  2. 文件（logging.file.name，默认 ~/.pr-reviewer/pr-reviewer.log）：MCP 模式下 jar 由客户端在后台拉起，
+     stderr 用户看不到，用 `tail -f ~/.pr-reviewer/pr-reviewer.log` 实时查看每次 LLM 调用的 token 和进度
+  C# 对照：≈ 在 ConfigureLogging 里同时配置 AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace) 和一个文件 provider
 -->
 <configuration>
+    <springProperty name="LOG_FILE_PATH" source="logging.file.name"
+                    defaultValue="${user.home}/.pr-reviewer/pr-reviewer.log"/>
+
     <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
         <target>System.err</target>
         <encoder>
@@ -14,9 +18,21 @@
         </encoder>
     </appender>
 
+    <!-- prudent：多个进程（如 MCP 会话 + 终端里的 CLI）同时写同一个文件时不会互相覆盖 -->
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>${LOG_FILE_PATH}</file>
+        <append>true</append>
+        <prudent>true</prudent>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [pid ${PID:-?}] %-5level %logger{20} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
     <logger name="com.lee.prreviewer" level="INFO"/>
 
     <root level="WARN">
         <appender-ref ref="STDERR"/>
+        <appender-ref ref="FILE"/>
     </root>
 </configuration>

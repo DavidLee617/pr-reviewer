@@ -81,17 +81,24 @@ public class ReviewPipeline {
                     List.of(), (System.nanoTime() - start) / 1_000_000, 0, 0);
         }
         listener.onPrepared(pr);
+        log.info("review_start mode={} prUrl={} files={} skipped={}", mode, prUrl, pr.files().size(),
+                pr.skippedFiles().size());
+        // 每个文件完成时先写一条进度日志（MCP 模式下看不到 CLI 进度，只能看日志文件），再交给调用方的 listener
+        ReviewProgressListener logged = (done, total, r) -> {
+            logFileReviewed(done, total, r);
+            listener.onFileReviewed(done, total, r);
+        };
 
         List<FileReviewResult> results;
         List<String> failedFiles;
         if (mode == ReviewMode.SINGLE) {
             FileReviewResult r = singleCall.review(pr.files(), pr.summary());
-            listener.onFileReviewed(1, 1, r);
+            logged.onFileReviewed(1, 1, r);
             results = List.of(r);
             // 一次调用失败 = 所有文件都没审到
             failedFiles = r.failed() ? pr.files().stream().map(FileDiff::path).toList() : List.of();
         } else {
-            results = mapReduce.review(pr.files(), pr.summary(), listener);
+            results = mapReduce.review(pr.files(), pr.summary(), logged);
             failedFiles = results.stream().filter(FileReviewResult::failed).map(FileReviewResult::file).toList();
         }
 
@@ -100,10 +107,28 @@ public class ReviewPipeline {
         List<ReviewError> errors = results.stream().flatMap(r -> r.errors().stream()).toList();
         long wallMs = (System.nanoTime() - start) / 1_000_000;
 
-        return new ReviewReport(mode, prUrl, pr.headSha(), pr.prFiles(), aggregator.aggregate(findings), failedFiles,
-                pr.skippedFiles(), errors, calls, wallMs,
+        ReviewReport report = new ReviewReport(mode, prUrl, pr.headSha(), pr.prFiles(), aggregator.aggregate(findings),
+                failedFiles, pr.skippedFiles(), errors, calls, wallMs,
                 calls.stream().mapToInt(CallMetrics::inputTokens).sum(),
                 calls.stream().mapToInt(CallMetrics::outputTokens).sum());
+        log.info("review_done mode={} findings={} failedFiles={} errors={} calls={} inputTokens={} outputTokens={} wallMs={}",
+                mode, report.findings().size(), failedFiles.size(), errors.size(), calls.size(),
+                report.totalInputTokens(), report.totalOutputTokens(), wallMs);
+        return report;
+    }
+
+    /** 与 CLI 进度行对应：[3/11] file  findings  in / out（含 JSON 重试的合计）  耗时。 */
+    private static void logFileReviewed(int done, int total, FileReviewResult r) {
+        int in = r.calls().stream().mapToInt(CallMetrics::inputTokens).sum();
+        int out = r.calls().stream().mapToInt(CallMetrics::outputTokens).sum();
+        long ms = r.calls().stream().mapToLong(CallMetrics::latencyMs).sum();
+        if (r.failed()) {
+            log.warn("file_reviewed [{}/{}] file={} failed inputTokens={} outputTokens={} latencyMs={} error={}",
+                    done, total, r.file(), in, out, ms, r.error());
+        } else {
+            log.info("file_reviewed [{}/{}] file={} findings={} inputTokens={} outputTokens={} latencyMs={}",
+                    done, total, r.file(), r.findings().size(), in, out, ms);
+        }
     }
 
     /** PR 链接 → 拉取 → 过滤 → 解析 patch → 生成摘要。 */
