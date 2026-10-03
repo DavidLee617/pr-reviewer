@@ -15,10 +15,11 @@
 | M4 | 并发 map + 去重汇总 + CLI `review` + 报告 | ✅ 已完成，PR #1 跑通（见第 6 节） |
 | M5 | single 模式（baseline）+ 报告错误溯源 | ✅ 已完成，PR #1 跑通（见第 6 节） |
 | M6 | 召回评估 + CLI `eval`；类别加 LOGIC / PERF | ✅ 已完成，PR #1 两种模式都算出召回（见第 6 节） |
-| **M7** | **MCP server 四个 tool** | ⏭ **下一步** |
+| M7 | MCP server 四个 tool | ✅ 已完成，用自写的 stdio 客户端验证四个 tool；**待用户在真实客户端（Claude Desktop / VSCode）验收** |
 | M8 | 写回 PR 评论（可选） | 未开始 |
+| — | 正式实验：50+ 文件的埋雷 PR + 答案 | ⏳ 用户在找 PR |
 
-- 单元测试：95 个，全部通过（`mvn package`）
+- 单元测试：99 个，全部通过（`mvn package`）
 - 测试用 PR：https://github.com/DavidLee617/bookmarket/pull/1 （分支 `feature/order-payment-coupon-search`，head `7fd23c0`，12 个文件，11 个 .java）
 - PR #1 的标准答案：`ground_truth.json`（19 个埋点，由用户的人工埋雷文档 `bookmarket-pr1-seeded-bugs.md` 转写）
 
@@ -47,6 +48,10 @@
 | #3（application.yml 硬编码 token）保留在答案里 | 文件被 include 规则跳过，任何模式都命中不了。召回分"全部"和"审查范围内"两个口径，如实反映过滤规则的盲区 |
 | 标准答案格式扩展：`locations` 多位置、`categories` 多类别、`severity`、`crossFile` | 跨文件雷涉及两个位置；文档有严重程度和跨文件标记，可分别统计单文件 / 跨文件召回 |
 | 报告加 `headSha`、`prFiles` | 分段需要 PR 原始文件顺序；headSha 用来核对答案的行号是否针对同一提交 |
+| MCP server 默认关闭，只在 `mcp` 命令下打开 | 否则 CLI 命令也会启动 stdio 传输，占用 stdin / stdout |
+| MCP tools 注册成 `SyncToolSpecification`，不是 `ToolCallbackProvider` | 后者会被 Spring AI 的 chat 模型收集为 LLM 工具，tools 又依赖 LLM 流水线 → 循环依赖（启动直接失败）。这些 tool 本来也只给 MCP 客户端用 |
+| MCP `review_file` 返回完整 `FileReviewResult` | 设计原为 `List<Finding>`；改为带 calls / error / errors，失败原因可溯源（与"任何一步出问题都能溯源"的要求一致） |
+| `list_pr_files` 不返回 diff 正文 | 避免把整个 PR 塞进 Agent 上下文，Agent 需要时调 `review_file` |
 | 摘要：v1 保留 | 讨论过"为什么不每次把完整 diff 给 LLM"：成本按"文件数 × PR 大小"增长、单次输入又与 PR 规模挂钩、会重复报问题。摘要是固定小篇幅的跨文件上下文 |
 
 ### 设计之外额外加的东西
@@ -86,7 +91,7 @@
 在 `pr-reviewer` 目录下执行：
 
 ```bash
-mvn package                                                         # 编译 + 95 个单元测试
+mvn package                                                         # 编译 + 99 个单元测试
 java -jar target/pr-reviewer.jar ping                               # 测 LLM 连通
 java -jar target/pr-reviewer.jar files --pr https://github.com/DavidLee617/bookmarket/pull/1 [--diff]
 java -jar target/pr-reviewer.jar review-file --pr https://github.com/DavidLee617/bookmarket/pull/1 --file OrderService.java
@@ -95,7 +100,9 @@ java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/book
 java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth ground_truth.json
 ```
 
-继续开发时，对 Claude 说"继续做 M7"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
+MCP 客户端配置见 README 的"MCP server"一节。
+
+继续开发时，对 Claude 说"继续做 M8"或"开始正式实验"即可；建议先让它读一下本文件和 `config/DESIGN.md`。
 
 ---
 
@@ -104,7 +111,9 @@ java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth gro
 ```
 src/main/java/com/lee/prreviewer/
 ├── PrReviewerApplication.java   入口；非 mcp 命令跑完即退出
-├── app/CliRunner.java           命令：ping / files / review-file / review / eval（mcp 待实现）
+├── app/CliRunner.java           命令：ping / files / review-file / review / eval / mcp（mcp 下不输出任何内容）
+├── app/McpTools.java            四个 MCP tool（@Tool），调用 ReviewPipeline / FindingAggregator
+├── app/McpServerConfig.java     把 McpTools 注册成 SyncToolSpecification
 ├── app/MarkdownReport.java      ReviewReport → Markdown（按 severity 分节）
 ├── app/EvalReport.java          EvalResult → Markdown
 ├── eval/                        RecallEvaluator（±3 行 + 一对一匹配）、GroundTruth、EvalResult
@@ -193,6 +202,18 @@ src/main/resources/
 - 未匹配埋点的 finding 主要是 `OrderController` 的 cancel / batchCancel 越权、page/size 未校验等，看起来是真问题但不在答案里（仅参考）
 - 加入五类规则后输入 token 增加约 14%（mapreduce 25492 → 29067）
 
+### M7 实测（自写的 Python stdio 客户端，按 MCP JSON-RPC 协议）
+
+- initialize：server `pr-reviewer 0.1.0`，协议协商为 `2024-11-05`（MCP Java SDK 0.18.3 stdio 只支持这一版，客户端会自动降级）
+- tools/list：四个 tool，参数和必填项正确（`mode` 可选）
+- `list_pr_files` 1.8s：11 个文件 + 跳过 application.yml，headSha 7fd23c0
+- `aggregate_findings`：去重保留 HIGH、排序正确
+- `review_file` 3.2s；不存在的文件返回 `isError=true` + 原始信息"PR 中没有文件 NoSuch.java"
+- `review_pr` 8.4s：11 次调用、23 条 finding、1 条 `FINDING_VALIDATION` 错误（第一次在真实运行中出现 errors，和 stderr 日志一致）；PR #9999 返回含 `PREPARE` 错误的报告
+- stdout 上没有任何非 JSON 行；客户端关闭 stdin 后进程正常退出（exit 0）
+- 从 `/tmp`、无 JAVA_HOME 的最小环境启动（模拟 GUI 客户端），加 `--spring.config.additional-location` 能正常读到密钥
+- CLI 命令（`files`）不受影响，不会启动 MCP server
+
 ---
 
 ## 7. 待决定 / 待办
@@ -208,16 +229,8 @@ src/main/resources/
 
 ---
 
-## 8. M7 要做什么（下一步）
+## 8. 接下来
 
-按 DESIGN.md 第 7.2、12 节：
-
-1. 加 Spring AI 的 MCP server starter（stdio 传输）；版本先查 Maven Central，和 Spring AI 1.1.8 的 BOM 对齐
-2. `app/McpServerConfig`：四个 tool，全部调用现有 `ReviewPipeline` / `FindingAggregator`
-   - `review_pr(prUrl, mode)` → `ReviewReport`（`pipeline.review`，listener 传 NONE）
-   - `list_pr_files(prUrl)` → 过滤后的文件列表、跳过列表、PR 摘要（`pipeline.prepare`）
-   - `review_file(prUrl, filePath)` → `List<Finding>`（`pipeline.reviewFile`；失败时把 errors 一起返回）
-   - `aggregate_findings(List<Finding>)` → 去重排序后的 `List<Finding>`
-3. `mcp` 命令常驻（`PrReviewerApplication` 已对 mcp 模式不退出）；CliRunner 在 mcp 模式下不能往 stdout 写任何东西
-4. README 写一份 MCP 客户端配置示例（command + args + 环境变量）
-5. 验收：从 MCP 客户端（Claude Desktop / VSCode Copilot Agent）调用 `review_pr`
+1. **M7 真实客户端验收**（用户）：按 README 配置 Claude Desktop / VSCode / Claude Code，调用 `review_pr`
+2. **正式实验**（用户找 PR）：50+ 文件、埋点分散在前 / 中 / 后三段；答案先写成文档，Claude 转成 `ground_truth.json` 并核对行号；然后两种模式各跑 2–3 次 + eval，重点看分段召回和跨文件召回
+3. **M8（可选）**：结果写回 PR 评论（DESIGN 第 12 节）——`POST /pulls/{n}/reviews`，行内评论需在 diff 范围内，CLI 加 `--post-comments`，默认关闭

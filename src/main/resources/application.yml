@@ -20,6 +20,20 @@ spring:
         options:
           model: ${llm.model}
           temperature: ${llm.temperature}
+    mcp:
+      server:
+        # 默认关闭：CLI 命令（review 等）不能启动 MCP server，否则 stdio 传输会占用 stdin / stdout。
+        # 只有 `mcp` 命令会打开它（见 PrReviewerApplication）
+        enabled: false
+        stdio: true
+        name: pr-reviewer
+        version: 0.1.0
+        type: sync
+        annotation-scanner:
+          enabled: false         # tools 用 @Tool 注册（见 McpServerConfig），不用 @McpTool 注解扫描
+        instructions: >-
+          审查 GitHub PR（Java 仓库）。review_pr 一键完整审查；
+          list_pr_files + review_file + aggregate_findings 可自行编排 map-reduce。
     retry:
       # 关闭 Spring AI 自带重试（默认 10 次），由 LlmClient 自己重试，才能准确记录 attempts
       max-attempts: 1

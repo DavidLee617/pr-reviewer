@@ -4,7 +4,7 @@
 
 代码注释里的「C# 对照」说明的是 Java/Spring 概念在 C#/.NET 中的对应写法，方便有 C# 背景的读者理解。
 
-当前进度：**M6**（mapreduce / single 两种模式 + 报告错误溯源 + 召回评估）。
+当前进度：**M7**（mapreduce / single 两种模式 + 报告错误溯源 + 召回评估 + MCP server）。
 
 审查规则在 `src/main/resources/rules/`（security / logic / perf / style / naming，对应五个类别），系统提示在 `src/main/resources/prompts/system.md`，可直接修改。
 
@@ -80,6 +80,67 @@ java -jar target/pr-reviewer.jar eval --report report.json --truth ground_truth.
 ```
 
 进度按完成顺序编号；路径省略了所有文件共同的目录前缀（首行会打印该前缀）；`in/out/耗时` 是该文件所有调用（含 JSON 重试）的合计。
+
+## MCP server
+
+同一个 jar 用 `mcp` 命令以 MCP stdio server 启动，由 MCP 客户端拉起，不要手动在终端里运行。
+
+| Tool | 参数 | 返回 |
+|---|---|---|
+| `review_pr` | `prUrl`，`mode`（可选，`mapreduce` / `single`） | 完整 `ReviewReport`（findings、失败 / 跳过文件、errors、计量） |
+| `list_pr_files` | `prUrl` | 待审文件（路径、变更类型、hunk 数、新增行数）、跳过文件、PR 摘要；不含 diff 正文 |
+| `review_file` | `prUrl`，`filePath`（完整路径或唯一后缀） | 该文件的 findings、LLM 调用计量、errors |
+| `aggregate_findings` | `findings` | 去重排序后的 findings |
+
+后三个 tool 让外部 Agent 自己编排 map-reduce。
+
+客户端配置要点（GUI 应用不会读 `~/.zshenv`，工作目录也不是本项目）：
+- `command` 写 JDK 21 的绝对路径
+- 用 `--spring.config.additional-location` 指向本项目的 `config/` 目录，密钥就不用写进客户端配置；也可以改用 `env` 传 `LLM_*` / `GITHUB_TOKEN`
+
+Claude Desktop（`~/Library/Application Support/Claude/claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "pr-reviewer": {
+      "command": "/opt/homebrew/opt/openjdk@21/bin/java",
+      "args": [
+        "-jar", "/Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar", "mcp",
+        "--spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/"
+      ]
+    }
+  }
+}
+```
+
+VSCode（工作区 `.vscode/mcp.json`，Copilot Agent 模式）：
+
+```json
+{
+  "servers": {
+    "pr-reviewer": {
+      "type": "stdio",
+      "command": "/opt/homebrew/opt/openjdk@21/bin/java",
+      "args": [
+        "-jar", "/Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar", "mcp",
+        "--spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/"
+      ]
+    }
+  }
+}
+```
+
+Claude Code：
+
+```bash
+claude mcp add pr-reviewer -- /opt/homebrew/opt/openjdk@21/bin/java -jar /Users/lee/Documents/spring/pr-reviewer/target/pr-reviewer.jar mcp --spring.config.additional-location=file:/Users/lee/Documents/spring/pr-reviewer/config/
+```
+
+说明：
+- 日志全部写 stderr，stdout 只走 MCP 协议；MCP server 只在 `mcp` 命令下启用，其他 CLI 命令不受影响
+- `review_pr` 对大 PR 可能要几十秒到几分钟，部分客户端的 tool 超时较短，必要时调大客户端超时
+- 协议版本为 `2024-11-05`（MCP Java SDK 0.18.3 的 stdio 传输），客户端会自动协商
 
 ## C# 开发者对照速查
 

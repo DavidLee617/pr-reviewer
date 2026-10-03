@@ -1,6 +1,6 @@
 # PR Reviewer 设计文档（实现用）
 
-> v1.4｜2026-10-02｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
+> v1.4｜2026-10-02｜v1.4：类别加 LOGIC / PERF；标准答案格式扩展（多位置、跨文件、严重程度）；命中改为 ±3 行 + 一对一匹配；报告加 headSha / prFiles；MCP 的 review_file 返回完整 FileReviewResult｜v1.3：报告新增 `errors`（ReviewError / ReviewStage），任何环节出错都可溯源｜v1.2：被审查语言由 C# 改为 Java；摘要上限 500 → 1500｜本文档供 AI 编码助手按里程碑实现。设计理由见 `pr-reviewer-design-notes.md`。
 
 ---
 
@@ -327,11 +327,17 @@ Tools（按"需要代码执行的操作"拆，不按审查类别拆）：
 | Tool | 输入 | 输出 | 说明 |
 |---|---|---|---|
 | `review_pr` | prUrl, mode | ReviewReport | 一键完整审查，Workflow 式编排 |
-| `list_pr_files` | prUrl | 过滤后的文件列表、跳过列表、PR 摘要 | 预处理 |
-| `review_file` | prUrl, filePath | List<Finding> | 单文件 map |
+| `list_pr_files` | prUrl | 过滤后的文件列表、跳过列表、PR 摘要 | 预处理；不含 diff 正文，避免把整个 PR 塞进 Agent 上下文 |
+| `review_file` | prUrl, filePath | FileReviewResult（findings + calls + error + errors） | 单文件 map；v1.4 起返回整个结果而非只有 List<Finding>，失败原因可溯源 |
 | `aggregate_findings` | List<Finding> | 去重排序后的 List<Finding> | reduce |
 
 后三个 tool 让外部 Agent 也能自己编排 map-reduce。
+
+实现要点（M7）：
+- 依赖 `spring-ai-starter-mcp-server`（stdio），版本由 spring-ai-bom 管理
+- `spring.ai.mcp.server.enabled` 默认 `false`，只在 `mcp` 命令下打开；否则 CLI 命令也会启动 stdio 传输并占用 stdin / stdout
+- tools 用 `@Tool` 定义，注册成 MCP 专用的 `SyncToolSpecification` bean，**不要注册成 `ToolCallbackProvider` bean**：Spring AI 的 chat 模型会收集所有 `ToolCallbackProvider` 作为 LLM 可调用的工具，而 tools 依赖调用 LLM 的流水线，形成循环依赖
+- 客户端从别的工作目录拉起 jar 时找不到 `./config/application.yml`，用 `--spring.config.additional-location` 指定，或用环境变量传密钥
 
 ---
 

@@ -45,7 +45,7 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
               java -jar pr-reviewer.jar review-file --pr <PR链接> --file <路径>   审查单个文件
               java -jar pr-reviewer.jar review --pr <PR链接> [--mode mapreduce|single] [--out report.json]   完整审查（默认 mapreduce）
               java -jar pr-reviewer.jar eval --report report.json --truth ground_truth.json             对照标准答案算召回
-              java -jar pr-reviewer.jar mcp                                    以 MCP stdio server 启动 (M7)
+              java -jar pr-reviewer.jar mcp                                    以 MCP stdio server 启动（由 MCP 客户端拉起，见 README）
             """; // ≈ C# 11 的原始字符串字面量 """..."""
 
     private final LlmClient llmClient;
@@ -75,7 +75,7 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
             case "review-file" -> reviewFile(args);
             case "review" -> review(args);
             case "eval" -> eval(args);
-            case "mcp" -> notYet(args[0]);
+            case "mcp" -> 0; // MCP server 由 Spring AI 自动配置启动；这里不能往 stdout 写任何东西（stdout 是协议通道）
             default -> {
                 System.out.println("未知命令: " + args[0]);
                 System.out.print(USAGE);
@@ -302,10 +302,6 @@ public class CliRunner implements CommandLineRunner, ExitCodeGenerator {
         return 0;
     }
 
-    private int notYet(String command) {
-        System.out.println("命令 '" + command + "' 尚未实现（见设计文档第 12 节里程碑）");
-        return 2;
-    }
 
     /** 取 "--name value" 形式的参数值，没有则返回 null。 */
     private static String option(String[] args, String name) {

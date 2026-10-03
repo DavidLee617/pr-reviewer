@@ -15,7 +15,13 @@
       "Bash(sed -i '' 's|系统提示 + 三套规则 + PR 摘要|系统提示 + 五套规则 + PR 摘要|' src/main/java/com/lee/prreviewer/map/PromptBuilder.java)",
       "Bash(sed -i '' 's|同时按 STYLE / SECURITY / NAMING 三套规则审查|同时按 SECURITY / LOGIC / PERF / STYLE / NAMING 五套规则审查|' src/main/java/com/lee/prreviewer/map/FileReviewer.java)",
       "Bash(java -jar target/pr-reviewer.jar eval --report report-mapreduce.json --truth ground_truth.json)",
-      "Bash(grep -n \"v1.3｜\\\\|enum Category\\\\|ReviewMode mode,\\\\|String prUrl,$\\\\|三套规则\\\\|STYLE / SECURITY / NAMING\\\\|rules/style.md\\\\|^### 埋点清单\\\\|^## 9\\\\|^### 匹配规则\\\\|^### 输出\\\\|^## 10\\\\|naming.md\\\\|eval --report\\\\|eval\\\\` 打印\" config/DESIGN.md)"
+      "Bash(grep -n \"v1.3｜\\\\|enum Category\\\\|ReviewMode mode,\\\\|String prUrl,$\\\\|三套规则\\\\|STYLE / SECURITY / NAMING\\\\|rules/style.md\\\\|^### 埋点清单\\\\|^## 9\\\\|^### 匹配规则\\\\|^### 输出\\\\|^## 10\\\\|naming.md\\\\|eval --report\\\\|eval\\\\` 打印\" config/DESIGN.md)",
+      "Bash(mvn -q dependency:resolve -DincludeArtifactIds=spring-ai-starter-mcp-server)",
+      "Bash(mvn -q dependency:tree -Dincludes=io.modelcontextprotocol.sdk,org.springframework.ai:spring-ai-mcp*,org.springframework.ai:spring-ai-autoconfigure-mcp*)",
+      "Bash(mvn dependency:tree '-Dincludes=io.modelcontextprotocol.sdk,org.springframework.ai')",
+      "Bash(timeout 120 python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py list list_pr_files aggregate_findings)",
+      "Bash(python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py list list_pr_files aggregate_findings)",
+      "Bash(python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py review_file review_pr)"
     ],
     "additionalDirectories": [
       "/Users/lee"

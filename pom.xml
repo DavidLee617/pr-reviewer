@@ -38,6 +38,12 @@
             <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
 
+        <!-- MCP server（stdio 传输），版本由 spring-ai-bom 1.1.8 管理。只在 `mcp` 命令下启用，见 PrReviewerApplication -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-mcp-server</artifactId>
+        </dependency>
+
         <!-- 配置校验（@NotBlank 等）。C# 对照：≈ DataAnnotations + ValidateOnStart() -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

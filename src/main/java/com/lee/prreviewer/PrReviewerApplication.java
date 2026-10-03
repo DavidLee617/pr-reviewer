@@ -16,10 +16,14 @@ import org.springframework.context.ConfigurableApplicationContext;
 public class PrReviewerApplication {
 
     public static void main(String[] args) {
+        boolean mcpMode = args.length > 0 && "mcp".equals(args[0]);
+        if (mcpMode) {
+            // application.yml 里 MCP server 默认关闭；系统属性优先级高于 application.yml，只在 mcp 命令下打开
+            System.setProperty("spring.ai.mcp.server.enabled", "true");
+        }
         ConfigurableApplicationContext context = SpringApplication.run(PrReviewerApplication.class, args);
         // 命令行模式：CliRunner 跑完即退出，退出码来自 CliRunner（ExitCodeGenerator）
-        // MCP 模式（M7）需要常驻，不在这里退出
-        boolean mcpMode = args.length > 0 && "mcp".equals(args[0]);
+        // MCP 模式：常驻，由 stdio 传输线程读 stdin，客户端关闭 stdin 后进程结束
         if (!mcpMode) {
             System.exit(SpringApplication.exit(context));
         }
