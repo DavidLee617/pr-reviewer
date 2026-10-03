@@ -167,6 +167,8 @@ class FileReviewerTest {
             assertThat(e.stage()).isEqualTo(ReviewStage.FINDING_VALIDATION);
             assertThat(e.file()).isEqualTo(PATH);
             assertThat(e.message()).contains("行号不在改动范围");
+            // map 模式 LLM 不填 file，message 里不应出现空的 "file="
+            assertThat(e.message()).doesNotContain("file=");
         });
         assertThat(r.errors()).extracting(ReviewError::message)
                 .anySatisfy(m -> assertThat(m).contains("line=14"))

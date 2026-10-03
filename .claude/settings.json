@@ -21,7 +21,11 @@
       "Bash(mvn dependency:tree '-Dincludes=io.modelcontextprotocol.sdk,org.springframework.ai')",
       "Bash(timeout 120 python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py list list_pr_files aggregate_findings)",
       "Bash(python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py list list_pr_files aggregate_findings)",
-      "Bash(python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py review_file review_pr)"
+      "Bash(python3 /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/mcp_client.py review_file review_pr)",
+      "Bash(claude --version)",
+      "Bash(claude mcp *)",
+      "Bash(java -jar target/pr-reviewer.jar review --pr https://github.com/DavidLee617/bookmarket/pull/1 --out /private/tmp/claude-501/-Users-lee-Documents-spring-pr-reviewer/30e198ab-a75f-4dc0-8d1e-cbe5db2bac2f/scratchpad/r-check.json)",
+      "Bash(python3 -c ' *)"
     ],
     "additionalDirectories": [
       "/Users/lee"

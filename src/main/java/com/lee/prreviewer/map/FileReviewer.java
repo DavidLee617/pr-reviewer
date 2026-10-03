@@ -60,8 +60,10 @@ public class FileReviewer {
     public static ReviewError droppedFinding(String file, String callLabel, ParsedFinding p, String reason) {
         log.warn("finding_dropped file={} line={} category={} reason={} message={}",
                 file, p.line(), p.category(), reason, p.message());
+        // p.file() 是 LLM 填的路径：只有 single 模式要求 LLM 填，map 模式下为空，空时不写，免得被误读为"文件路径丢失"
+        String llmFile = p.file() == null || p.file().isBlank() ? "" : "LLM 填的 file=" + p.file() + " ";
         return new ReviewError(ReviewStage.FINDING_VALIDATION, file, callLabel, false,
-                "finding 被丢弃（" + reason + "）: file=" + p.file() + " line=" + p.line() + " category=" + p.category()
+                "finding 被丢弃（" + reason + "）: " + llmFile + "line=" + p.line() + " category=" + p.category()
                         + " severity=" + p.severity() + " message=" + p.message());
     }
 
